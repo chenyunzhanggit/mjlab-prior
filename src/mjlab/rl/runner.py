@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import torch
 from rsl_rl.env import VecEnv
@@ -55,6 +56,13 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
       dynamic_axes={},
       dynamo=False,
     )
+
+  @staticmethod
+  def _get_export_paths(checkpoint_path: str) -> tuple[Path, str, Path]:
+    """Resolve ONNX export paths from a checkpoint path."""
+    export_dir = Path(checkpoint_path).parent
+    filename = f"{export_dir.name}.onnx"
+    return export_dir, filename, export_dir / filename
 
   def save(self, path: str, infos=None) -> None:
     """Save checkpoint.
