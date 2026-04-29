@@ -26,6 +26,12 @@ from mjlab.tasks.motion_prior.observations_cfg import (
   make_teacher_b_obs_group,
 )
 from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
+from mjlab.tasks.tracking.mdp.commands import (
+  MotionCommandCfg as SingleMotionCommandCfg,
+)
+from mjlab.tasks.tracking.mdp.multi_commands import (
+  MotionCommandCfg as MultiMotionCommandCfg,
+)
 from mjlab.tasks.velocity.config.g1.env_cfgs import unitree_g1_rough_env_cfg
 
 
@@ -51,7 +57,15 @@ def _make_g1_terrain_scan_sensor() -> RayCastSensorCfg:
 
 
 def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Flat motion-prior env (teacher_a / Teleopit tracking branch)."""
+  """Flat motion-prior env (teacher_a / Teleopit tracking branch).
+
+  Replaces the inherited single-motion ``MotionCommandCfg`` with the
+  ``MultiMotionCommandCfg`` so distillation can iterate over a directory
+  of motion clips. The tracking task itself stays unchanged — we only
+  swap the cfg for *this* env via in-place mutation. CLI override of
+  ``--env.commands.motion.motion-path`` lands before the command's
+  ``__init__`` runs, so the directory glob happens at the right moment.
+  """
   cfg = unitree_g1_flat_tracking_env_cfg(has_state_estimation=True, play=play)
 
   # Inject a terrain_scan raycast that matches rough env's spec, so the
@@ -62,6 +76,28 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
   existing = tuple(cfg.scene.sensors or ())
   if not any(s.name == "terrain_scan" for s in existing):
     cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
+
+  # Swap single-motion -> multi-motion. Carry over every field so the
+  # tracking-task defaults (resampling_time_range, pose/velocity ranges,
+  # body lists, debug_vis, viz mode) survive the swap.
+  old = cfg.commands["motion"]
+  assert isinstance(old, SingleMotionCommandCfg)
+  cfg.commands["motion"] = MultiMotionCommandCfg(
+    resampling_time_range=old.resampling_time_range,
+    debug_vis=old.debug_vis,
+    entity_name=old.entity_name,
+    anchor_body_name=old.anchor_body_name,
+    body_names=old.body_names,
+    pose_range=old.pose_range,
+    velocity_range=old.velocity_range,
+    joint_position_range=old.joint_position_range,
+    motion_files=[],
+    motion_path="",  # CLI injects via --env.commands.motion.motion-path
+    motion_type="isaaclab",
+    enable_adaptive_sampling=False,
+    start_from_zero_step=False,
+    if_log_metrics=True,
+  )
 
   enable_corruption = not play
   teacher_a, teacher_a_history = make_teacher_a_obs_groups(

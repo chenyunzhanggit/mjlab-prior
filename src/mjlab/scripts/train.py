@@ -15,6 +15,9 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp.multi_commands import (
+  MotionCommandCfg as _MultiMotionCommandCfg,
+)
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
@@ -70,34 +73,51 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   registry_name: str | None = None
 
-  # Check if this is a tracking task by checking for motion command.
+  # Check if this is a tracking task by checking for motion command. Both
+  # the single-motion and multi-motion command cfgs count.
   is_tracking_task = "motion" in cfg.env.commands and isinstance(
-    cfg.env.commands["motion"], MotionCommandCfg
+    cfg.env.commands["motion"], (MotionCommandCfg, _MultiMotionCommandCfg)
   )
 
   if is_tracking_task:
     motion_cmd = cfg.env.commands["motion"]
-    assert isinstance(motion_cmd, MotionCommandCfg)
 
-    # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
-    if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
-      print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
-    elif cfg.registry_name:
-      # Download from WandB registry.
-      registry_name = cast(str, cfg.registry_name)
-      if ":" not in registry_name:
-        registry_name = registry_name + ":latest"
-      import wandb
-
-      api = wandb.Api()
-      artifact = api.artifact(registry_name)
-      motion_cmd.motion_file = str(Path(artifact.download()) / "motion.npz")
+    if isinstance(motion_cmd, _MultiMotionCommandCfg):
+      # Multi-motion: trust CLI-injected ``motion_path`` (or explicit
+      # ``motion_files``) and skip the W&B artifact path entirely; the
+      # motion_path → file-list expansion lives in
+      # ``MultiMotionCommand.__init__`` so CLI overrides land first.
+      if not motion_cmd.motion_path and not motion_cmd.motion_files:
+        raise ValueError(
+          "Multi-motion tracking task requires either:\n"
+          "  --env.commands.motion.motion-path /path/to/motion_dir (recursive *.npz glob)\n"
+          "  or an explicit list via --env.commands.motion.motion-files"
+        )
+      if motion_cmd.motion_path:
+        print(f"[INFO] Using motion directory: {motion_cmd.motion_path}")
+      else:
+        print(f"[INFO] Using {len(motion_cmd.motion_files)} explicit motion files")
     else:
-      raise ValueError(
-        "For tracking tasks, provide either:\n"
-        "  --registry-name your-org/motions/motion-name (download from WandB)\n"
-        "  --env.commands.motion.motion-file /path/to/motion.npz (local file)"
-      )
+      assert isinstance(motion_cmd, MotionCommandCfg)
+      # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
+      if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
+        print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
+      elif cfg.registry_name:
+        # Download from WandB registry.
+        registry_name = cast(str, cfg.registry_name)
+        if ":" not in registry_name:
+          registry_name = registry_name + ":latest"
+        import wandb
+
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        motion_cmd.motion_file = str(Path(artifact.download()) / "motion.npz")
+      else:
+        raise ValueError(
+          "For tracking tasks, provide either:\n"
+          "  --registry-name your-org/motions/motion-name (download from WandB)\n"
+          "  --env.commands.motion.motion-file /path/to/motion.npz (local file)"
+        )
 
   # Enable NaN guard if requested.
   if cfg.enable_nan_guard:
@@ -172,9 +192,6 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
 
-  import ipdb
-
-  ipdb.set_trace()
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
   )
