@@ -28,7 +28,7 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.sim.mujoco.ccd_iterations = 500
   cfg.sim.contact_sensor_maxmatch = 500
-  cfg.sim.nconmax = 70
+  cfg.sim.nconmax = 100
 
   cfg.scene.entities = {"robot": get_g1_robot_cfg()}
 
