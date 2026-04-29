@@ -35,6 +35,36 @@ STUDENT_HISTORY_LENGTH = 4
 TEACHER_A_HISTORY_LENGTH = 10
 """History length for teacher_a's Conv1D path (Teleopit cfg.actor_history_length)."""
 
+HEIGHT_SCAN_MAX_DISTANCE = 5.0
+"""Default ``terrain_scan`` ``max_distance`` (matches velocity_env_cfg.py)."""
+
+
+def make_student_height_scan_term(
+  sensor_name: str = "terrain_scan",
+  history_length: int = 1,
+  max_distance: float = HEIGHT_SCAN_MAX_DISTANCE,
+) -> ObservationTermCfg:
+  """Height-scan student term, matching ``make_velocity_env_cfg``'s actor scan.
+
+  Caller must ensure the env's scene registers a raycast sensor with
+  ``sensor_name`` (e.g. ``terrain_scan``). Pair with ``extra_terms`` of
+  ``make_student_obs_group``. Switching to depth later means swapping this
+  factory for one that emits a depth tensor in its own obs group.
+
+  ``history_length`` defaults to 1 (no temporal stacking) to match
+  teacher_b — teacher_b's actor sees a single 187-dim scan slice, so
+  stacking history on the student side adds parameters without giving
+  the distillation target any new signal. Override only if you later
+  introduce a teacher whose action depends on terrain history.
+  """
+  return ObservationTermCfg(
+    func=envs_mdp.height_scan,
+    params={"sensor_name": sensor_name},
+    noise=Unoise(n_min=-0.1, n_max=0.1),
+    scale=1.0 / max_distance,
+    history_length=history_length,
+  )
+
 
 def make_student_obs_group(
   history_length: int = STUDENT_HISTORY_LENGTH,

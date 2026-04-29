@@ -37,6 +37,16 @@
 - `Mjlab-MotionPrior-Rough-Unitree-G1` — rough env + teacher_b（单 teacher baseline）
 - `Mjlab-MotionPrior-VQ-Flat-Unitree-G1` — VQ-VAE 蒸馏，env 同 flat 版
 
+**双教师同卡训练只需起 Flat 一个 task**（容易绕进去的点）
+
+`Mjlab-MotionPrior-Flat-Unitree-G1` 在 **env_cfg 层面** 是单 env（只含 flat tracking + teacher_a obs），但只要它走 motion_prior runner（`MotionPriorOnPolicyRunner`，`src/mjlab/tasks/motion_prior/rl/runner.py:62-100`），runner 会在 `__init__` 里通过 `_build_secondary_env` 用 `secondary_task_id`（默认 `Mjlab-MotionPrior-Rough-Unitree-G1`）和 `secondary_num_envs` 自己再起一个 rough env，两个 env 在**同一个进程、同一张 GPU**上并行 rollout，共享一份 student policy。
+
+所以"同时蒸馏 flat tracking + rough locomotion → motion prior"的启动方式是：
+- **只起 `--task Mjlab-MotionPrior-Flat-Unitree-G1` 一个**；
+- 用 `--env.scene.num-envs` 控 primary（flat）env 大小；
+- 用 `--agent.secondary-num-envs` 控 secondary（rough）env 大小；
+- **不要**再开第二张卡 / 第二个进程跑 `-Rough-` task。`-Rough-` task id 主要是给 runner 内部 `load_env_cfg` 用的（顺便也可作单教师 baseline 单跑）。
+
 **测试总数**：54（53 fast + 1 slow GPU e2e）。`make check`（ruff format / check / ty）全清。
 
 **部署 path**：ONNX 导出 + `runner.get_inference_policy()` 都走 **Path 3** —
