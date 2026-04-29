@@ -510,6 +510,20 @@ document.write(`
 <section id="added">
 <h3>Added<a class="headerlink" href="#added" title="Link to this heading">#</a></h3>
 <ul class="simple">
+<li><p>Added a dual-teacher motion-prior distillation task family
+(<code class="docutils literal notranslate"><span class="pre">Mjlab-MotionPrior-Flat-Unitree-G1</span></code>,
+<code class="docutils literal notranslate"><span class="pre">Mjlab-MotionPrior-Rough-Unitree-G1</span></code>,
+<code class="docutils literal notranslate"><span class="pre">Mjlab-MotionPrior-VQ-Flat-Unitree-G1</span></code>). The runner orchestrates two
+<code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv</span></code> instances on a single GPU: a flat motion-tracking
+env feeding a frozen Teleopit <code class="docutils literal notranslate"><span class="pre">TemporalCNN</span></code> teacher, and a rough
+velocity env feeding a frozen mjlab MLP teacher. A single student
+policy (VAE or VQ-VAE) is distilled from both via per-teacher behavior
+loss, AR(1) latent smoothing, KL/commit regularization, and a shared
+<code class="docutils literal notranslate"><span class="pre">motion_prior</span></code> head whose deploy-time path consumes proprioception
+only. ONNX export and <code class="docutils literal notranslate"><span class="pre">get_inference_policy</span></code> use that deploy path so
+<code class="docutils literal notranslate"><span class="pre">mjlab.scripts.play</span></code> / sim2real ingest the trained student without
+needing teacher obs at runtime. See
+<code class="docutils literal notranslate"><span class="pre">src/mjlab/tasks/motion_prior/README.md</span></code> for the launch recipe.</p></li>
 <li><p>Added <code class="docutils literal notranslate"><span class="pre">--log-root</span></code> CLI option to <code class="docutils literal notranslate"><span class="pre">train</span></code>, <code class="docutils literal notranslate"><span class="pre">play</span></code>, and <code class="docutils literal notranslate"><span class="pre">evaluate</span></code>
 scripts for choosing where training logs are stored. Defaults to
 <code class="docutils literal notranslate"><span class="pre">logs/rsl_rl</span></code> (unchanged behavior). Useful for directing outputs to a
