@@ -1,10 +1,50 @@
 # Motion Prior 蒸馏迁移计划（isaaclab → mjlab）
 
-> 把 isaaclab 工程 `~/project/motionprior` 中的 `g1_motion_prior` /
+> 把 isaaclab 工程 `~/zcy/motionprior` 中的 `g1_motion_prior` /
 > `g1_motion_prior_vq` 两个 task 的策略蒸馏流程，迁移到本仓库 mjlab 环境。
-> **Teacher Policy 来自 `~/project/Teleopit/train_mimic/`**（基于 mjlab
-> 派生的 tracking 任务），ckpt 已就绪：`~/project/Teleopit/track.pt`
-> 与 `~/project/Teleopit/track_*.onnx`。
+> **Dual-Teacher 蒸馏**：
+> - `teacher_a` = Teleopit `track.pt`（TemporalCNN, 166 obs + 10 帧 history → 29 dof）
+>   → ckpt: `~/zcy/Teleopit/track.pt`
+> - `teacher_b` = mjlab `Mjlab-Velocity-Rough-Unitree-G1` 训出的 actor（**plain MLP**, 286 obs → 29 dof）
+>   → ckpt: `~/zcy/mjlab-prior/logs/model_21000.pt`
+
+---
+
+## 实施进度（截至 2026-04-29）
+
+**完成（task #1–#9）**
+
+| TODO# | 状态 | 文件 / 关键产出 |
+|---|---|---|
+| #1 | ✅ | Teleopit ckpt 内部结构梳理（`actor_state_dict` 27 tensor 1:1 对应 `TemporalCNNModel`） |
+| #2 | ✅ | `src/mjlab/tasks/motion_prior/{__init__,motion_prior_env_cfg,mdp,rl,config}` 骨架 |
+| #3 | ✅ | `mdp/observations.py`（`ref_base_lin_vel_b/ref_base_ang_vel_b/ref_projected_gravity_b`）+ `observations_cfg.py`（student / teacher_a / teacher_a_history / teacher_b builder）+ `config/g1/env_cfgs.py` 双 env 变体 |
+| #4 | ✅ | flat env reward 裁到只剩 `motion_global_anchor_pos`；rough env 保留全套 velocity reward / curriculum |
+| #5 | ✅ | `tests/test_motion_prior_teacher_load.py`（8 tests，PyTorch ↔ ONNX 1e-5 一致） |
+| #6 | ✅ | `rl/policies/motion_prior_policy.py` `MotionPriorPolicy` + `teacher/velocity_loader.py`（teacher_b loader）+ `tests/test_motion_prior_policy.py`（8 tests） |
+| #7 | ✅ | `rl/algorithms/distillation_motion_prior.py`（dual-teacher behavior + AR(1) + 退火 KL + 可选 align_loss + 子模块 grad clip）+ `tests/test_motion_prior_algorithm.py`（8 tests） |
+| #8 | ✅ | `rl/runner.py` `MotionPriorOnPolicyRunner` 双 vec env 串联 rollout；`_collect_rollout` 只存 detached inputs，`_epoch_step` 每 epoch 重新前向构图 + `tests/test_motion_prior_runner.py`（4 tests） |
+| #9 | ✅ | `rl_cfg.py` typed `RslRlMotionPriorRunnerCfg / PolicyCfg / AlgoCfg`；`config/g1/rl_cfg.py` 用 typed cfg |
+
+**已注册任务 ID**
+
+- `Mjlab-MotionPrior-Flat-Unitree-G1` — flat env + teacher_a + VAE 蒸馏
+- `Mjlab-MotionPrior-Rough-Unitree-G1` — rough env + teacher_b
+- `Mjlab-MotionPrior-VQ-Flat-Unitree-G1` — VQ 占位（task #11/#12）
+
+**关键设计修正（区别于最初设计）**
+
+1. **teacher_b 不是另一个 TemporalCNN**。它来自 `Mjlab-Velocity-Rough-Unitree-G1`，是 plain MLP（286 → MLP[512,256,128] → 29，scalar Gaussian std）。
+   原 prior.md 中假定"teacher_b 同理"那段是错的；teacher_b 没有 `actor_history` 路径，只吃 1-D obs。
+2. **双 vec env 而非单 env mixed terrain**。teacher_a 期望 flat 地面，teacher_b 期望 rough 地形 — 用两个 `ManagerBasedRlEnv` 在同一 GPU 进程并行 rollout（runner 内部各 step 一次），共享一份 student policy。
+   - 要点：`student` obs schema 在两 env 上严格一致（5 项 proprio × history=4 = 372 维），保证 student 网络在两边都能跑。
+   - GPU 显存：`secondary_num_envs` 默认与 primary 同尺寸，单卡足够；缩 num_envs 即可让出空间。
+3. **Rollout / epoch 解耦**。原 motionprior 在 rollout 时直接存 student 输出（autograd graph），多 epoch 重 backward 会撞 `RuntimeError`。我们改为：rollout 全 `torch.no_grad`，只存 detached inputs；每 epoch 用存好的输入重新前向，graph 全新。
+4. **ckpt 路径**：原文档写 `~/project/...`，实际仓库都在 `~/zcy/...`。
+
+**测试快照**：`uv run pytest tests/test_motion_prior_*.py` → 28 passed。`make check`（ruff format / check / ty）全清。
+
+**剩余 task**：#10（小规模端到端跑通，要 motion_file + GPU）、#11/#12（VQ policy + algorithm）、#13（play / ONNX 导出）、#14（changelog + README）。
 
 ---
 
@@ -141,7 +181,7 @@ outputs: actions      shape=[1, 29]
 
 ## motionprior 工程参考实现要点（迁移可直接照抄/对照）
 
-下面所有引用都基于 `~/project/motionprior/source/whole_body_tracking/` 子树。
+下面所有引用都基于 `~/zcy/motionprior/source/whole_body_tracking/` 子树。
 
 ### A. Teacher 观测组成（`envs/base/base_config.py:118-156`）
 
@@ -498,7 +538,7 @@ VQ 版把 encoder 输出量化到 codebook（2048×64），KL 换成离散 cross
 执行建议顺序：**1 → 2 → 3 → 4 → 11 → 5 → 7 → 9 → 10 → 12 → 6 → 8 → 13 → 14**。
 
 ### 1. 梳理 Teacher checkpoint 接口 & 对齐观测（**Teleopit Teacher**）
-Teacher 来自 `~/project/Teleopit`：`track.pt`（含 obs_normalizer + Conv1D
+Teacher 来自 `~/zcy/Teleopit`：`track.pt`（含 obs_normalizer + Conv1D
 encoder + MLP）。具体行动：
 
 1. 在 mjlab 端把 Teleopit 的 `tasks/tracking/rl/temporal_cnn_model.py` 与
@@ -717,8 +757,8 @@ BPTT-like 更新）。
 
 ### 11. Teleopit Teacher 加载 & ONNX 一致性冒烟测试
 单独写一个 pytest（`tests/test_motion_prior_teacher_load.py`）：
-1. 加载 `~/project/Teleopit/track.pt` 到 `TemporalCNNModel`，加载
-   `~/project/Teleopit/track.onnx` 到 `onnxruntime.InferenceSession`
+1. 加载 `~/zcy/Teleopit/track.pt` 到 `TemporalCNNModel`，加载
+   `~/zcy/Teleopit/track.onnx` 到 `onnxruntime.InferenceSession`
 2. 构造 dummy 输入：`obs (1, D_actor)`, `obs_history (1, 10, D_actor)`，
    值用 `torch.randn(seed=42)` 固定
 3. **PyTorch 推理**：`teacher_a(obs, obs_history)`（走 deterministic 路径）
@@ -772,6 +812,6 @@ teacher / encoder（部署时没有 teacher_obs）。
 
 ## 用户原始草稿（保留）
 
-先完成上述的内容，但和 ~/project/motionprior 不同的是，我这个工程中的网络会接收两个 Teacher，并把他们压缩到同一 motion prior 中，有两种方法：
+先完成上述的内容，但和 ~/zcy/motionprior 不同的是，我这个工程中的网络会接收两个 Teacher，并把他们压缩到同一 motion prior 中，有两种方法：
 1. 用同一个 Encoder, obs 维度的不同之处填充 -100 作为占位； 2. 两个 Teacher 用两个 Encoder，但这就要考虑这两个 encoder 输出的 mu and std 是不是要加 loss 约束其距离？ 否则会出现不同动作分布重合的情况？
 (先采用两个encoder 的方式把)

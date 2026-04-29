@@ -32,7 +32,7 @@ from mjlab.tasks.motion_prior.teacher import (
   load_teleopit_teacher,
 )
 
-TELEOPIT_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
+TELEOPIT_CKPT = Path("~/zcy/Teleopit/track.pt").expanduser()
 
 
 # ---------------------------------------------------------------------------

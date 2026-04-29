@@ -1,0 +1,71 @@
+"""Typed runner / algorithm / policy config for motion-prior distillation.
+
+``RslRlMotionPriorRunnerCfg`` extends mjlab's ``RslRlBaseRunnerCfg`` so it
+plugs into ``register_mjlab_task`` and the standard ``train.py`` /
+``play.py`` flow. ``train.py`` calls ``dataclasses.asdict`` on the agent
+cfg, and ``MotionPriorOnPolicyRunner.__init__`` reads from that dict via
+``cfg["policy"]["latent_z_dims"]`` etc. — keep field names in sync.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+from mjlab.rl.config import RslRlBaseRunnerCfg
+
+
+@dataclass
+class RslRlMotionPriorPolicyCfg:
+  """Hidden-dim / latent shape spec for the dual-encoder VAE policy."""
+
+  encoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  decoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  motion_prior_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  latent_z_dims: int = 32
+  activation: str = "elu"
+  class_name: str = "MotionPriorPolicy"
+
+
+@dataclass
+class RslRlMotionPriorAlgoCfg:
+  """Loss weights, KL annealing schedule, and optimizer knobs."""
+
+  loss_type: Literal["mse", "huber"] = "mse"
+  learning_rate: float = 5.0e-4
+  max_grad_norm: float = 1.0
+  num_learning_epochs: int = 5
+
+  behavior_weight_a: float = 1.0
+  behavior_weight_b: float = 1.0
+
+  mu_regu_loss_coeff: float = 0.01
+  ar1_phi: float = 0.99
+
+  kl_loss_coeff_max: float = 0.01
+  kl_loss_coeff_min: float = 0.001
+  anneal_start_iter: int = 2500
+  anneal_end_iter: int = 5000
+
+  align_loss_coeff: float = 0.0
+  class_name: str = "DistillationMotionPrior"
+
+
+@dataclass
+class RslRlMotionPriorRunnerCfg(RslRlBaseRunnerCfg):
+  """Top-level config for the dual-env motion-prior runner."""
+
+  class_name: str = "MotionPriorOnPolicyRunner"
+
+  # Secondary (rough / velocity) env spun up internally by the runner.
+  secondary_task_id: str = "Mjlab-MotionPrior-Rough-Unitree-G1"
+  """Task ID of the rough env (teacher_b's training distribution)."""
+  secondary_num_envs: int = 4096
+  """Number of envs for the rough env. Defaults match a typical primary."""
+
+  # Frozen teacher checkpoints (paths can use ``~`` for $HOME).
+  teacher_a_policy_path: str = "~/zcy/Teleopit/track.pt"
+  teacher_b_policy_path: str = "~/zcy/mjlab-prior/logs/model_21000.pt"
+
+  policy: RslRlMotionPriorPolicyCfg = field(default_factory=RslRlMotionPriorPolicyCfg)
+  algorithm: RslRlMotionPriorAlgoCfg = field(default_factory=RslRlMotionPriorAlgoCfg)

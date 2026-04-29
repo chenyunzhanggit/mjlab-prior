@@ -1,4 +1,10 @@
-"""Frozen Teleopit teacher utilities for motion prior distillation."""
+"""Frozen teacher utilities for motion prior distillation.
+
+Two teacher families are supported:
+
+* ``load_teleopit_teacher`` — Teleopit ``track.pt`` (TemporalCNN, 1-D + 3-D).
+* ``load_velocity_teacher`` — mjlab Velocity-Rough actor (plain MLP, 1-D).
+"""
 
 from mjlab.tasks.motion_prior.teacher.conv1d_encoder import Conv1dEncoder
 from mjlab.tasks.motion_prior.teacher.loader import (
@@ -9,6 +15,12 @@ from mjlab.tasks.motion_prior.teacher.loader import (
   make_dummy_obs,
 )
 from mjlab.tasks.motion_prior.teacher.temporal_cnn_model import TemporalCNNModel
+from mjlab.tasks.motion_prior.teacher.velocity_loader import (
+  VELOCITY_TEACHER_CFG,
+  VelocityTeacherCfg,
+  build_velocity_teacher,
+  load_velocity_teacher,
+)
 
 __all__ = [
   "Conv1dEncoder",
@@ -18,4 +30,8 @@ __all__ = [
   "build_teleopit_teacher",
   "load_teleopit_teacher",
   "make_dummy_obs",
+  "VELOCITY_TEACHER_CFG",
+  "VelocityTeacherCfg",
+  "build_velocity_teacher",
+  "load_velocity_teacher",
 ]
