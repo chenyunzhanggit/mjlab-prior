@@ -10,9 +10,9 @@
 
 ---
 
-## 实施进度（截至 2026-04-29）
+## 实施进度（截至 2026-04-29，14 个 task 全部完成）
 
-**完成（task #1–#9）**
+**完成（task #1–#14）**
 
 | TODO# | 状态 | 文件 / 关键产出 |
 |---|---|---|
@@ -25,12 +25,25 @@
 | #7 | ✅ | `rl/algorithms/distillation_motion_prior.py`（dual-teacher behavior + AR(1) + 退火 KL + 可选 align_loss + 子模块 grad clip）+ `tests/test_motion_prior_algorithm.py`（8 tests） |
 | #8 | ✅ | `rl/runner.py` `MotionPriorOnPolicyRunner` 双 vec env 串联 rollout；`_collect_rollout` 只存 detached inputs，`_epoch_step` 每 epoch 重新前向构图 + `tests/test_motion_prior_runner.py`（4 tests） |
 | #9 | ✅ | `rl_cfg.py` typed `RslRlMotionPriorRunnerCfg / PolicyCfg / AlgoCfg`；`config/g1/rl_cfg.py` 用 typed cfg |
+| #10 | ✅ | `tests/test_motion_prior_e2e.py`（slow，GPU 真盘 32+32 envs × 5 iter，46s 通过） |
+| #11 | ✅ | `rl/policies/quantizer.py` `EMAQuantizer`（`code_sum/count` 改 buffer，device-agnostic）+ `motion_prior_vq_policy.py` `MotionPriorVQPolicy`（双 encoder + 共享 codebook/decoder/motion_prior）+ `tests/test_motion_prior_vq_policy.py`（11 tests） |
+| #12 | ✅ | `rl/algorithms/distillation_motion_prior_vq.py`（behavior + AR(1) on raw enc + commit + mp code-prediction，无 KL/align）+ `tests/test_motion_prior_vq_algorithm.py`（6 tests） |
+| #13 | ✅ | `onnx.py`（`MotionPriorVAEDeployModel` / `MotionPriorVQDeployModel` Path 3 + `export_motion_prior_to_onnx`）+ runner `get_inference_policy` + `export_policy_to_onnx`，`save()` 自动落盘 ONNX + `tests/test_motion_prior_onnx.py`（8 tests，PyTorch ↔ ONNX 1e-5 一致） |
+| #14 | ✅ | `docs/source/changelog.rst` 新增 Added 条目；`src/mjlab/tasks/motion_prior/README.md` 含架构图、launch 命令、loss 公式、与 upstream 差异说明 |
 
 **已注册任务 ID**
 
-- `Mjlab-MotionPrior-Flat-Unitree-G1` — flat env + teacher_a + VAE 蒸馏
-- `Mjlab-MotionPrior-Rough-Unitree-G1` — rough env + teacher_b
-- `Mjlab-MotionPrior-VQ-Flat-Unitree-G1` — VQ 占位（task #11/#12）
+- `Mjlab-MotionPrior-Flat-Unitree-G1` — flat env + teacher_a + VAE 蒸馏（**双 teacher 训练入口**：runner 内部建 rough env）
+- `Mjlab-MotionPrior-Rough-Unitree-G1` — rough env + teacher_b（单 teacher baseline）
+- `Mjlab-MotionPrior-VQ-Flat-Unitree-G1` — VQ-VAE 蒸馏，env 同 flat 版
+
+**测试总数**：54（53 fast + 1 slow GPU e2e）。`make check`（ruff format / check / ty）全清。
+
+**部署 path**：ONNX 导出 + `runner.get_inference_policy()` 都走 **Path 3** —
+`prop_obs (372) → motion_prior → [mp_mu | code_dim] → decoder → action (29)`。
+机器人侧没有 motion command / ref velocities / height_scan，所以 teacher 路径只在仿真评估时用，不参与部署。
+
+启动命令、loss 详解、与 upstream 差异等见 `src/mjlab/tasks/motion_prior/README.md`。
 
 **关键设计修正（区别于最初设计）**
 
@@ -42,9 +55,7 @@
 3. **Rollout / epoch 解耦**。原 motionprior 在 rollout 时直接存 student 输出（autograd graph），多 epoch 重 backward 会撞 `RuntimeError`。我们改为：rollout 全 `torch.no_grad`，只存 detached inputs；每 epoch 用存好的输入重新前向，graph 全新。
 4. **ckpt 路径**：原文档写 `~/project/...`，实际仓库都在 `~/zcy/...`。
 
-**测试快照**：`uv run pytest tests/test_motion_prior_*.py` → 28 passed。`make check`（ruff format / check / ty）全清。
-
-**剩余 task**：#10（小规模端到端跑通，要 motion_file + GPU）、#11/#12（VQ policy + algorithm）、#13（play / ONNX 导出）、#14（changelog + README）。
+**所有 task 已完成。** 后续工作：跑长 horizon 训练 + sim2real 验证。
 
 ---
 

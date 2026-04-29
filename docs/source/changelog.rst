@@ -8,6 +8,20 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added a dual-teacher motion-prior distillation task family
+  (``Mjlab-MotionPrior-Flat-Unitree-G1``,
+  ``Mjlab-MotionPrior-Rough-Unitree-G1``,
+  ``Mjlab-MotionPrior-VQ-Flat-Unitree-G1``). The runner orchestrates two
+  ``ManagerBasedRlEnv`` instances on a single GPU: a flat motion-tracking
+  env feeding a frozen Teleopit ``TemporalCNN`` teacher, and a rough
+  velocity env feeding a frozen mjlab MLP teacher. A single student
+  policy (VAE or VQ-VAE) is distilled from both via per-teacher behavior
+  loss, AR(1) latent smoothing, KL/commit regularization, and a shared
+  ``motion_prior`` head whose deploy-time path consumes proprioception
+  only. ONNX export and ``get_inference_policy`` use that deploy path so
+  ``mjlab.scripts.play`` / sim2real ingest the trained student without
+  needing teacher obs at runtime. See
+  ``src/mjlab/tasks/motion_prior/README.md`` for the launch recipe.
 - Added ``--log-root`` CLI option to ``train``, ``play``, and ``evaluate``
   scripts for choosing where training logs are stored. Defaults to
   ``logs/rsl_rl`` (unchanged behavior). Useful for directing outputs to a

@@ -398,7 +398,12 @@ class MotionPriorOnPolicyRunner:
 
   def save(self, path: str, infos: dict | None = None) -> None:
     """Persist policy + optimizer + iter. Frozen teachers are NOT saved
-    (they are reloaded from their ckpt paths on construction)."""
+    (they are reloaded from their ckpt paths on construction).
+
+    Also dumps a deploy-ready ``policy.onnx`` next to the checkpoint
+    (Path 3: ``prop_obs → motion_prior → decoder → action``); ONNX
+    failures are logged but do not break training.
+    """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     state = {
       # Slice trainable submodules; the two frozen teachers re-load from disk.
@@ -418,6 +423,44 @@ class MotionPriorOnPolicyRunner:
     }
     torch.save(state, path)
     print(f"[MotionPrior] saved checkpoint to {path}")
+    try:
+      onnx_path = Path(path).with_suffix(".onnx")
+      self.export_policy_to_onnx(str(onnx_path))
+    except Exception as e:
+      print(f"[MotionPrior] ONNX export failed (training continues): {e}")
+
+  def export_policy_to_onnx(
+    self, path: str, filename: str | None = None, verbose: bool = False
+  ) -> None:
+    """Export Path 3 (prop_obs → motion_prior → decoder → action) to ONNX."""
+    from mjlab.tasks.motion_prior.onnx import export_motion_prior_to_onnx
+
+    output = Path(path)
+    if filename is not None:
+      output = output / filename
+    export_motion_prior_to_onnx(self.policy, output, verbose=verbose)
+
+  def get_inference_policy(self, device: str | torch.device | None = None):
+    """Return a callable ``(obs_td) -> action`` that runs Path 3 deploy.
+
+    Used by ``mjlab.scripts.play``: takes the env's TensorDict, slices the
+    ``student`` group (proprioception only), and runs the trained
+    motion_prior + decoder under ``torch.no_grad``. teacher_obs groups
+    are ignored — at deploy time they aren't available.
+    """
+    from mjlab.tasks.motion_prior.onnx import build_deploy_model
+
+    deploy = build_deploy_model(self.policy)
+    if device is not None:
+      deploy = deploy.to(device)
+    deploy.eval()
+
+    def _policy(obs_td) -> torch.Tensor:
+      prop = _t(obs_td, "student")
+      with torch.no_grad():
+        return deploy(prop)
+
+    return _policy
 
   def load(
     self,
