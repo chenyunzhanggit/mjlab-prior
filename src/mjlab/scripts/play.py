@@ -241,9 +241,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
-    import ipdb
-
-    ipdb.set_trace()
+    import ipdb; ipdb.set_trace()
     policy = runner.get_inference_policy(device=device)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.

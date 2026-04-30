@@ -515,7 +515,6 @@ class MotionPriorOnPolicyRunner:
         if chosen == "encoder_b":
           return self.policy.policy_inference_b(prop, _t(obs_td, "teacher_b"))
         return _deploy_call(prop)
-
     return _policy
 
   def load(
