@@ -1,3 +1,6 @@
+from mjlab.tasks.motion_prior.rl.policies.downstream_policy import (
+  DownStreamPolicy as DownStreamPolicy,
+)
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_policy import (
   MotionPriorPolicy as MotionPriorPolicy,
 )
