@@ -792,7 +792,7 @@ class MultiMotionCommandCfg(CommandTermCfg):
   joint_position_range: tuple[float, float] = (-0.52, 0.52)
 
   enable_adaptive_sampling: bool = False
-  start_from_zero_step: bool = False
+  start_from_zero_step: bool = True #False
   if_log_metrics: bool = True
 
   def build(self, env: ManagerBasedRlEnv) -> MultiMotionCommand:

@@ -16,6 +16,9 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp.multi_commands import (
+  MotionCommandCfg as MultiMotionCommandCfg,
+)
 from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
@@ -39,6 +42,14 @@ class PlayConfig:
   """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
   checkpoint_file: str | None = None
   motion_file: str | None = None
+  motion_path: str | None = None
+  """Directory of .npz motions for multi-motion tasks (recursive glob)."""
+  motion_type: Literal["isaaclab", "mujoco"] | None = None
+  """Joint/body order of the motion data; only used by multi-motion cfgs."""
+  teacher_a_policy_path: str | None = None
+  """Override for motion_prior runner's teacher_a checkpoint path."""
+  teacher_b_policy_path: str | None = None
+  """Override for motion_prior runner's teacher_b checkpoint path."""
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -73,17 +84,35 @@ def run_play(task_id: str, cfg: PlayConfig):
     print("[INFO]: Terminations disabled")
 
   # Check if this is a tracking task by checking for motion command.
-  is_tracking_task = "motion" in env_cfg.commands and isinstance(
-    env_cfg.commands["motion"], MotionCommandCfg
-  )
+  motion_cmd_for_check = env_cfg.commands.get("motion")
+  is_single_motion_task = isinstance(motion_cmd_for_check, MotionCommandCfg)
+  is_multi_motion_task = isinstance(motion_cmd_for_check, MultiMotionCommandCfg)
+  is_tracking_task = is_single_motion_task or is_multi_motion_task
 
-  if is_tracking_task and cfg._demo_mode:
+  if is_single_motion_task and cfg._demo_mode:
     # Demo mode: use uniform sampling to see more diversity with num_envs > 1.
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
     motion_cmd.sampling_mode = "uniform"
 
-  if is_tracking_task:
+  if is_multi_motion_task:
+    # Multi-motion tasks (e.g. motion_prior flat env): only --motion-path /
+    # --motion-type are honored. wandb artifact / single motion_file paths
+    # don't apply since the cfg field is ``motion_path`` (directory glob).
+    motion_cmd = env_cfg.commands["motion"]
+    assert isinstance(motion_cmd, MultiMotionCommandCfg)
+    if cfg.motion_path is not None:
+      print(f"[INFO]: Using local motion path: {cfg.motion_path}")
+      motion_cmd.motion_path = cfg.motion_path
+      motion_cmd.motion_files = []  # let MultiMotionCommand glob the dir
+    if cfg.motion_type is not None:
+      motion_cmd.motion_type = cfg.motion_type
+    if not motion_cmd.motion_path and not motion_cmd.motion_files:
+      raise ValueError(
+        "Multi-motion tracking task requires --motion-path /path/to/dir "
+        "(or pre-populated motion_files in the env_cfg)."
+      )
+  elif is_single_motion_task:
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
 
@@ -201,10 +230,18 @@ def run_play(task_id: str, cfg: PlayConfig):
       policy = PolicyRandom()
   else:
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-    runner = runner_cls(env, asdict(agent_cfg), device=device)
+    agent_cfg_dict = asdict(agent_cfg)
+    # motion_prior runner reads ``teacher_a_policy_path`` / ``teacher_b_policy_path``
+    # off the agent cfg dict at __init__ time. Other tasks just ignore the keys.
+    if cfg.teacher_a_policy_path is not None:
+      agent_cfg_dict["teacher_a_policy_path"] = cfg.teacher_a_policy_path
+    if cfg.teacher_b_policy_path is not None:
+      agent_cfg_dict["teacher_b_policy_path"] = cfg.teacher_b_policy_path
+    runner = runner_cls(env, agent_cfg_dict, device=device)
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
+    import ipdb; ipdb.set_trace()
     policy = runner.get_inference_policy(device=device)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.

@@ -5,25 +5,23 @@
 set -euo pipefail
 
 # ---- override via env vars or edit defaults below ----
-RUN="${RUN:-/home/bcj/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior/<timestamp>}"
-CKPT="${CKPT:-model_99000.pt}"
-MOTION_PATH="${MOTION_PATH:-/tmp/motions_tiny}"
-MOTION_TYPE="${MOTION_TYPE:-mujoco}"   # set to "isaaclab" for Data10k
-TEACHER_A="${TEACHER_A:-/home/bcj/zcy/Teleopit/track.pt}"
-TEACHER_B="${TEACHER_B:-/home/bcj/zcy/mjlab-prior/logs/model_21000.pt}"
+RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior/2026-04-29_22-52-01}"
+CKPT="${CKPT:-model_19999.pt}"
+MOTION_PATH="${MOTION_PATH:-/home/lenovo/g1_retargeted_data/npz/Data10k/}"
+MOTION_TYPE="${MOTION_TYPE:-isaaclab}"   
+TEACHER_A="${TEACHER_A:-/home/lenovo/project/Teleopit/track.pt}"
+TEACHER_B="${TEACHER_B:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_velocity/2026-04-28_16-16-06/model_21000.pt}"
 NUM_ENVS="${NUM_ENVS:-1}"
 # -------------------------------------------------------
 
 cd "$(dirname "$0")"
 
 uv run python -m mjlab.scripts.play \
-  --task Mjlab-MotionPrior-Flat-Unitree-G1 \
-  --env.commands.motion.motion-path "$MOTION_PATH" \
-  --env.commands.motion.motion-type "$MOTION_TYPE" \
-  --env.scene.num-envs "$NUM_ENVS" \
-  --agent.secondary-num-envs "$NUM_ENVS" \
-  --agent.load-run "$RUN" \
-  --agent.load-checkpoint "$CKPT" \
-  --agent.teacher-a-policy-path "$TEACHER_A" \
-  --agent.teacher-b-policy-path "$TEACHER_B" \
+  Mjlab-MotionPrior-Flat-Unitree-G1 \
+  --checkpoint-file "$RUN/$CKPT" \
+  --motion-path "$MOTION_PATH" \
+  --motion-type "$MOTION_TYPE" \
+  --num-envs 1 \
+  --teacher-a-policy-path "$TEACHER_A" \
+  --teacher-b-policy-path "$TEACHER_B" \
   "$@"

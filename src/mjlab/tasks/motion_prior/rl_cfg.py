@@ -60,7 +60,7 @@ class RslRlMotionPriorRunnerCfg(RslRlBaseRunnerCfg):
   # Secondary (rough / velocity) env spun up internally by the runner.
   secondary_task_id: str = "Mjlab-MotionPrior-Rough-Unitree-G1"
   """Task ID of the rough env (teacher_b's training distribution)."""
-  secondary_num_envs: int = 4096
+  secondary_num_envs: int = 1
   """Number of envs for the rough env. Defaults match a typical primary."""
 
   # Frozen teacher checkpoints (paths can use ``~`` for $HOME).

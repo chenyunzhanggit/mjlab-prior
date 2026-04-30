@@ -7,24 +7,29 @@
 # The same checkpoint trained under Mjlab-MotionPrior-Flat-Unitree-G1 is
 # loaded here; only the trainable submodules (motion_prior + decoder + the
 # two encoders) are restored, frozen teachers reload from their ckpt paths.
+#
+# Rough env uses a `twist` velocity command, NOT a motion command, so no
+# --motion-path / --motion-type flags are passed.
+#
+# Note: motion_prior runner builds a secondary env on top of the primary one;
+# when the primary is already rough, you end up with two rough envs sharing
+# NUM_ENVS each. Keep NUM_ENVS small (1 for visualization) to avoid GPU OOM.
 set -euo pipefail
 
 # ---- override via env vars or edit defaults below ----
-RUN="${RUN:-/home/bcj/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior/<timestamp>}"
-CKPT="${CKPT:-model_99000.pt}"
-TEACHER_A="${TEACHER_A:-/home/bcj/zcy/Teleopit/track.pt}"
-TEACHER_B="${TEACHER_B:-/home/bcj/zcy/mjlab-prior/logs/model_21000.pt}"
+RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior/2026-04-29_22-52-01}"
+CKPT="${CKPT:-model_19999.pt}"
+TEACHER_A="${TEACHER_A:-/home/lenovo/project/Teleopit/track.pt}"
+TEACHER_B="${TEACHER_B:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_velocity/2026-04-28_16-16-06/model_21000.pt}"
 NUM_ENVS="${NUM_ENVS:-1}"
 # -------------------------------------------------------
 
 cd "$(dirname "$0")"
 
 uv run python -m mjlab.scripts.play \
-  --task Mjlab-MotionPrior-Rough-Unitree-G1 \
-  --env.scene.num-envs "$NUM_ENVS" \
-  --agent.secondary-num-envs "$NUM_ENVS" \
-  --agent.load-run "$RUN" \
-  --agent.load-checkpoint "$CKPT" \
-  --agent.teacher-a-policy-path "$TEACHER_A" \
-  --agent.teacher-b-policy-path "$TEACHER_B" \
+  Mjlab-MotionPrior-Rough-Unitree-G1 \
+  --checkpoint-file "$RUN/$CKPT" \
+  --num-envs "$NUM_ENVS" \
+  --teacher-a-policy-path "$TEACHER_A" \
+  --teacher-b-policy-path "$TEACHER_B" \
   "$@"

@@ -310,7 +310,6 @@ class ObservationManager(ManagerBase):
     # multiple times per control step (e.g., in get_observations() after step()).
     if not update_history and self._obs_buffer is not None:
       return self._obs_buffer
-
     obs_buffer: dict[str, torch.Tensor | dict[str, torch.Tensor]] = dict()
     for group_name in self._group_obs_term_names:
       obs_buffer[group_name] = self.compute_group(group_name, update_history)

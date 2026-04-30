@@ -191,7 +191,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
+  import ipdb
 
+  ipdb.set_trace()
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
   )
