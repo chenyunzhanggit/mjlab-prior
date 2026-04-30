@@ -43,6 +43,7 @@ from pathlib import Path
 import torch
 
 REQUIRED_KEYS = ("decoder", "motion_prior", "mp_mu")
+VQ_REQUIRED_KEYS = ("decoder", "motion_prior", "quantizer")
 
 
 def load_motion_prior_components(
@@ -50,7 +51,7 @@ def load_motion_prior_components(
   *,
   device: str | torch.device = "cpu",
 ) -> dict[str, dict]:
-  """Load the three frozen sub-state-dicts from a motion-prior checkpoint.
+  """Load the three VAE frozen sub-state-dicts from a motion-prior checkpoint.
 
   Returns:
     Dict with exactly the keys ``"decoder"``, ``"motion_prior"``,
@@ -75,3 +76,33 @@ def load_motion_prior_components(
     )
 
   return {k: ckpt[k] for k in REQUIRED_KEYS}
+
+
+def load_motion_prior_vq_components(
+  ckpt_path: str | Path,
+  *,
+  device: str | torch.device = "cpu",
+) -> dict[str, dict]:
+  """Load the VQ frozen sub-state-dicts from a motion-prior VQ checkpoint.
+
+  Returns:
+    Dict with exactly the keys ``"decoder"``, ``"motion_prior"``,
+    ``"quantizer"`` — each value is a state_dict.
+
+  ``MotionPriorVQOnPolicyRunner.save()`` writes these top-level keys.
+  ``DownStreamVQPolicy`` consumes them as its frozen backbone.
+  """
+  ckpt_path = Path(ckpt_path).expanduser()
+  if not ckpt_path.is_file():
+    raise FileNotFoundError(f"motion_prior VQ checkpoint not found: {ckpt_path}")
+
+  ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+  missing = [k for k in VQ_REQUIRED_KEYS if k not in ckpt]
+  if missing:
+    raise KeyError(
+      f"motion_prior VQ checkpoint at {ckpt_path} is missing keys {missing}; "
+      f"top-level keys: {sorted(ckpt.keys())}. "
+      "DownStreamVQPolicy needs decoder / motion_prior / quantizer."
+    )
+
+  return {k: ckpt[k] for k in VQ_REQUIRED_KEYS}

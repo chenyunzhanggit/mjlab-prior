@@ -72,24 +72,28 @@ class DownStreamOnPolicyRunner:
     self._critic_obs_shape = tuple(critic_obs.shape[1:])
 
     # ---- Build policy ---------------------------------------------------- #
-    motion_prior_ckpt = train_cfg["motion_prior_ckpt_path"]
+    # play.py doesn't expose --agent.* flags, so env var is the only way to
+    # inject the motion-prior ckpt path into a play-time runner. Train.py
+    # users still pass --agent.motion-prior-ckpt-path normally; the env var
+    # is just a fallback when the cfg field is empty.
+    motion_prior_ckpt = train_cfg.get("motion_prior_ckpt_path") or os.environ.get(
+      "MJLAB_MOTION_PRIOR_CKPT", ""
+    )
+    if not motion_prior_ckpt:
+      raise ValueError(
+        "DownStreamOnPolicyRunner needs a motion_prior checkpoint. Set either "
+        "--agent.motion-prior-ckpt-path on the train CLI, or the "
+        "MJLAB_MOTION_PRIOR_CKPT environment variable for play."
+      )
     policy_cfg = train_cfg.get("policy", {})
 
-    self.policy = DownStreamPolicy(
+    self.policy = self._build_policy(
       num_obs=int(policy_obs.shape[-1]),
       num_actions=int(self.env.num_actions),
       num_privileged_obs=int(critic_obs.shape[-1]),
       prop_obs_dim=int(prop_obs.shape[-1]),
       motion_prior_ckpt_path=motion_prior_ckpt,
-      latent_z_dims=int(policy_cfg.get("latent_z_dims", 32)),
-      motion_prior_hidden_dims=tuple(
-        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
-      ),
-      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
-      actor_hidden_dims=tuple(policy_cfg.get("actor_hidden_dims", (512, 256, 128))),
-      critic_hidden_dims=tuple(policy_cfg.get("critic_hidden_dims", (512, 256, 128))),
-      activation=str(policy_cfg.get("activation", "elu")),
-      init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
+      policy_cfg=policy_cfg,
       device=device,
     )
 
@@ -136,6 +140,37 @@ class DownStreamOnPolicyRunner:
     self._len_buf: deque[float] = deque(maxlen=100)
     self._cur_rew = torch.zeros(self.env.num_envs, device=device)
     self._cur_len = torch.zeros(self.env.num_envs, device=device)
+
+  def _build_policy(
+    self,
+    *,
+    num_obs: int,
+    num_actions: int,
+    num_privileged_obs: int,
+    prop_obs_dim: int,
+    motion_prior_ckpt_path: str,
+    policy_cfg: dict,
+    device: str | torch.device,
+  ) -> DownStreamPolicy:
+    """Construct the trainable policy. Subclasses (e.g. VQ runner) override
+    to swap in a different policy class with different hyperparams."""
+    return DownStreamPolicy(
+      num_obs=num_obs,
+      num_actions=num_actions,
+      num_privileged_obs=num_privileged_obs,
+      prop_obs_dim=prop_obs_dim,
+      motion_prior_ckpt_path=motion_prior_ckpt_path,
+      latent_z_dims=int(policy_cfg.get("latent_z_dims", 32)),
+      motion_prior_hidden_dims=tuple(
+        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
+      ),
+      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
+      actor_hidden_dims=tuple(policy_cfg.get("actor_hidden_dims", (512, 256, 128))),
+      critic_hidden_dims=tuple(policy_cfg.get("critic_hidden_dims", (512, 256, 128))),
+      activation=str(policy_cfg.get("activation", "elu")),
+      init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
+      device=device,
+    )
 
   # ------------------------------------------------------------------ #
   # train.py interface                                                  #
@@ -241,7 +276,9 @@ class DownStreamOnPolicyRunner:
     """Persist trainable submodules + optimizer + iter.
 
     Frozen motion_prior / mp_mu / decoder are NOT saved — they reload from
-    ``motion_prior_ckpt_path`` on construction.
+    ``motion_prior_ckpt_path`` on construction. Also dumps a deploy-ready
+    ``policy.onnx`` (combined prop_obs + policy_obs → action) next to the
+    checkpoint; failures are logged but do not break training.
     """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -254,6 +291,29 @@ class DownStreamOnPolicyRunner:
     }
     torch.save(state, path)
     print(f"[DownStream] saved checkpoint to {path}")
+    try:
+      onnx_path = Path(path).with_suffix(".onnx")
+      self.export_policy_to_onnx(str(onnx_path))
+    except Exception as e:
+      print(f"[DownStream] ONNX export failed (training continues): {e}")
+
+  def export_policy_to_onnx(
+    self,
+    path: str,
+    filename: str | None = None,
+    *,
+    mode: str = "combined",
+    verbose: bool = False,
+  ) -> None:
+    """Export deploy ONNX. ``mode='combined'`` writes the full chain
+    (prop_obs + policy_obs → action); ``'actor'`` writes only the
+    trainable actor (policy_obs → raw_latent)."""
+    from mjlab.tasks.motion_prior.onnx import export_downstream_to_onnx
+
+    output = Path(path)
+    if filename is not None:
+      output = output / filename
+    export_downstream_to_onnx(self.policy, output, mode=mode, verbose=verbose)
 
   def load(
     self,
@@ -292,3 +352,53 @@ class DownStreamOnPolicyRunner:
         )
 
     return _policy
+
+
+class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
+  """Downstream PPO runner that swaps in a VQ-VAE motion-prior backbone.
+
+  Identical to :class:`DownStreamOnPolicyRunner` except ``_build_policy``
+  constructs a :class:`DownStreamVQPolicy` (frozen motion_prior MLP +
+  shared codebook quantizer + frozen decoder, instead of the VAE
+  motion_prior MLP + ``mp_mu`` + decoder).
+
+  Save/load and ONNX export inherit unchanged: the trainable parameters
+  (actor / critic / std) and persistence layout are the same; the
+  combined ONNX deploy module dispatches by policy type.
+  """
+
+  def _build_policy(
+    self,
+    *,
+    num_obs: int,
+    num_actions: int,
+    num_privileged_obs: int,
+    prop_obs_dim: int,
+    motion_prior_ckpt_path: str,
+    policy_cfg: dict,
+    device: str | torch.device,
+  ):
+    from mjlab.tasks.motion_prior.rl.policies.downstream_vq_policy import (
+      DownStreamVQPolicy,
+    )
+
+    return DownStreamVQPolicy(
+      num_obs=num_obs,
+      num_actions=num_actions,
+      num_privileged_obs=num_privileged_obs,
+      prop_obs_dim=prop_obs_dim,
+      motion_prior_ckpt_path=motion_prior_ckpt_path,
+      num_code=int(policy_cfg.get("num_code", 2048)),
+      code_dim=int(policy_cfg.get("code_dim", 64)),
+      motion_prior_hidden_dims=tuple(
+        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
+      ),
+      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
+      actor_hidden_dims=tuple(policy_cfg.get("actor_hidden_dims", (512, 256, 128))),
+      critic_hidden_dims=tuple(policy_cfg.get("critic_hidden_dims", (512, 256, 128))),
+      activation=str(policy_cfg.get("activation", "elu")),
+      init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
+      use_lab=bool(policy_cfg.get("use_lab", True)),
+      lab_lambda=float(policy_cfg.get("lab_lambda", 3.0)),
+      device=device,
+    )

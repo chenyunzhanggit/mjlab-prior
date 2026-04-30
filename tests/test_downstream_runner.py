@@ -174,3 +174,41 @@ def test_runner_add_git_repo_to_log_is_noop(ckpt_path: Path, tmp_path: Path) -> 
     device="cpu",
   )
   runner.add_git_repo_to_log("/tmp/whatever.py")  # must not raise
+
+
+def test_motion_prior_ckpt_env_var_fallback(
+  ckpt_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+  """Empty cfg field + ``MJLAB_MOTION_PRIOR_CKPT`` env var → runner builds OK."""
+  env = _FakeVecEnv()
+  cfg = _make_train_cfg(ckpt_path)
+  cfg["motion_prior_ckpt_path"] = ""  # simulate play.py loading default cfg
+  monkeypatch.setenv("MJLAB_MOTION_PRIOR_CKPT", str(ckpt_path))
+  runner = DownStreamOnPolicyRunner(
+    env=env,  # type: ignore[arg-type]
+    train_cfg=cfg,
+    log_dir=str(tmp_path),
+    device="cpu",
+  )
+  assert runner.policy is not None  # build succeeded
+
+
+def test_motion_prior_ckpt_missing_raises(tmp_path: Path, monkeypatch) -> None:
+  """Both cfg field empty AND env var unset → clear error message."""
+  monkeypatch.delenv("MJLAB_MOTION_PRIOR_CKPT", raising=False)
+  env = _FakeVecEnv()
+  cfg = {
+    "num_steps_per_env": NUM_STEPS,
+    "save_interval": 100,
+    "motion_prior_ckpt_path": "",
+    "policy": {"latent_z_dims": LATENT, "actor_hidden_dims": (64, 32)},
+    "algorithm": {"num_learning_epochs": 1, "num_mini_batches": 1},
+    "logger": "none",
+  }
+  with pytest.raises(ValueError, match="motion_prior checkpoint"):
+    DownStreamOnPolicyRunner(
+      env=env,  # type: ignore[arg-type]
+      train_cfg=cfg,
+      log_dir=str(tmp_path),
+      device="cpu",
+    )

@@ -515,6 +515,7 @@ class MotionPriorOnPolicyRunner:
         if chosen == "encoder_b":
           return self.policy.policy_inference_b(prop, _t(obs_td, "teacher_b"))
         return _deploy_call(prop)
+
     return _policy
 
   def load(
@@ -542,4 +543,67 @@ class MotionPriorOnPolicyRunner:
 
 
 class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
-  """VQ-VAE motion-prior runner — body lands in prior.md task #12."""
+  """VQ-VAE motion-prior runner.
+
+  Behaves identically to :class:`MotionPriorOnPolicyRunner` (same dual-env
+  rollout, same train loop) but the policy has different submodules:
+  ``MotionPriorVQPolicy`` carries a ``quantizer`` (codebook + EMA stats)
+  in place of ``mp_mu`` / ``mp_var``. ``save`` / ``load`` are overridden so
+  the VQ-specific state_dict keys round-trip correctly.
+  """
+
+  def save(self, path: str, infos: dict | None = None) -> None:
+    """Persist trainable VAE-VQ submodules + quantizer buffers + iter.
+
+    Frozen teacher_a / teacher_b are NOT saved (reload from ckpt paths on
+    construction). Also dumps a deploy ONNX next to the ckpt; failures
+    log but don't break training.
+    """
+    from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
+      MotionPriorVQPolicy,
+    )
+
+    assert isinstance(self.policy, MotionPriorVQPolicy)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    state = {
+      "encoder_a": self.policy.encoder_a.state_dict(),
+      "encoder_b": self.policy.encoder_b.state_dict(),
+      "decoder": self.policy.decoder.state_dict(),
+      "motion_prior": self.policy.motion_prior.state_dict(),
+      # Quantizer state_dict carries codebook + code_sum + code_count
+      # buffers (registered in EMAQuantizer).
+      "quantizer": self.policy.quantizer.state_dict(),
+      "optimizer": self.alg.optimizer.state_dict(),
+      "iter": self.current_learning_iteration,
+      "infos": infos or {},
+    }
+    torch.save(state, path)
+    print(f"[MotionPriorVQ] saved checkpoint to {path}")
+    try:
+      onnx_path = Path(path).with_suffix(".onnx")
+      self.export_policy_to_onnx(str(onnx_path))
+    except Exception as e:
+      print(f"[MotionPriorVQ] ONNX export failed (training continues): {e}")
+
+  def load(
+    self,
+    path: str,
+    load_cfg: dict | None = None,
+    strict: bool = True,
+    map_location: str | None = None,
+  ) -> dict:
+    from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
+      MotionPriorVQPolicy,
+    )
+
+    assert isinstance(self.policy, MotionPriorVQPolicy)
+    state = torch.load(path, map_location=map_location, weights_only=False)
+    self.policy.encoder_a.load_state_dict(state["encoder_a"], strict=strict)
+    self.policy.encoder_b.load_state_dict(state["encoder_b"], strict=strict)
+    self.policy.decoder.load_state_dict(state["decoder"], strict=strict)
+    self.policy.motion_prior.load_state_dict(state["motion_prior"], strict=strict)
+    self.policy.quantizer.load_state_dict(state["quantizer"], strict=strict)
+    if "optimizer" in state and state["optimizer"]:
+      self.alg.optimizer.load_state_dict(state["optimizer"])
+    self.current_learning_iteration = int(state.get("iter", 0))
+    return state.get("infos", {})

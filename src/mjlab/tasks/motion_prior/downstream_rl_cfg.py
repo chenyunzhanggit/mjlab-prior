@@ -23,6 +23,24 @@ class RslRlDownstreamPolicyCfg:
 
 
 @dataclass
+class RslRlDownstreamVQPolicyCfg:
+  """VQ-flavor policy hyperparams. ``num_code`` / ``code_dim`` MUST match
+  whatever the motion-prior VQ training used."""
+
+  motion_prior_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  decoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  num_code: int = 2048
+  code_dim: int = 64
+  activation: str = "elu"
+  init_noise_std: float = 1.0
+  use_lab: bool = True
+  lab_lambda: float = 3.0
+  class_name: str = "DownStreamVQPolicy"
+
+
+@dataclass
 class RslRlDownstreamPpoCfg:
   """PPO hyperparams for the downstream task. Standard knobs only."""
 
@@ -52,4 +70,21 @@ class RslRlDownstreamRunnerCfg(RslRlBaseRunnerCfg):
   before running training (CLI override or edited in cfg)."""
 
   policy: RslRlDownstreamPolicyCfg = field(default_factory=RslRlDownstreamPolicyCfg)
+  algorithm: RslRlDownstreamPpoCfg = field(default_factory=RslRlDownstreamPpoCfg)
+
+
+@dataclass
+class RslRlDownstreamVQRunnerCfg(RslRlBaseRunnerCfg):
+  """Top-level config for ``DownStreamVQOnPolicyRunner``.
+
+  ``motion_prior_ckpt_path`` should point at a VQ motion-prior checkpoint
+  (saved by ``MotionPriorVQOnPolicyRunner.save``), which carries
+  ``decoder``, ``motion_prior``, and ``quantizer`` top-level keys.
+  """
+
+  class_name: str = "DownStreamVQOnPolicyRunner"
+
+  motion_prior_ckpt_path: str = ""
+
+  policy: RslRlDownstreamVQPolicyCfg = field(default_factory=RslRlDownstreamVQPolicyCfg)
   algorithm: RslRlDownstreamPpoCfg = field(default_factory=RslRlDownstreamPpoCfg)

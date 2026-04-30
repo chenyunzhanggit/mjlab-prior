@@ -1,6 +1,10 @@
-from mjlab.tasks.motion_prior.downstream_rl_cfg import RslRlDownstreamRunnerCfg
+from mjlab.tasks.motion_prior.downstream_rl_cfg import (
+  RslRlDownstreamRunnerCfg,
+  RslRlDownstreamVQRunnerCfg,
+)
 from mjlab.tasks.motion_prior.rl import (
   DownStreamOnPolicyRunner,
+  DownStreamVQOnPolicyRunner,
   MotionPriorOnPolicyRunner,
   MotionPriorVQOnPolicyRunner,
 )
@@ -58,4 +62,19 @@ register_mjlab_task(
     max_iterations=100_000,
   ),
   runner_cls=DownStreamOnPolicyRunner,
+)
+
+# VQ flavor: same env, swaps in DownStreamVQPolicy (motion_prior + frozen
+# codebook quantizer + decoder). Needs a VQ motion-prior ckpt.
+register_mjlab_task(
+  task_id="Mjlab-Downstream-VQ-Velocity-Unitree-G1",
+  env_cfg=unitree_g1_downstream_velocity_env_cfg(),
+  play_env_cfg=unitree_g1_downstream_velocity_env_cfg(play=True),
+  rl_cfg=RslRlDownstreamVQRunnerCfg(
+    experiment_name="g1_downstream_vq_velocity",
+    save_interval=500,
+    num_steps_per_env=24,
+    max_iterations=100_000,
+  ),
+  runner_cls=DownStreamVQOnPolicyRunner,
 )

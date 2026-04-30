@@ -9,6 +9,7 @@ Two teacher families are supported:
 from mjlab.tasks.motion_prior.teacher.conv1d_encoder import Conv1dEncoder
 from mjlab.tasks.motion_prior.teacher.downstream_ckpt_loader import (
   load_motion_prior_components,
+  load_motion_prior_vq_components,
 )
 from mjlab.tasks.motion_prior.teacher.loader import (
   TELEOPIT_TEACHER_CFG,
@@ -33,6 +34,7 @@ __all__ = [
   "build_teleopit_teacher",
   "load_teleopit_teacher",
   "load_motion_prior_components",
+  "load_motion_prior_vq_components",
   "make_dummy_obs",
   "VELOCITY_TEACHER_CFG",
   "VelocityTeacherCfg",
