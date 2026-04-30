@@ -440,25 +440,81 @@ class MotionPriorOnPolicyRunner:
       output = output / filename
     export_motion_prior_to_onnx(self.policy, output, verbose=verbose)
 
-  def get_inference_policy(self, device: str | torch.device | None = None):
-    """Return a callable ``(obs_td) -> action`` that runs Path 3 deploy.
+  def get_inference_policy(
+    self,
+    device: str | torch.device | None = None,
+    path: str | None = None,
+  ):
+    """Return a callable ``(obs_td) -> action`` that runs the chosen path.
 
-    Used by ``mjlab.scripts.play``: takes the env's TensorDict, slices the
-    ``student`` group (proprioception only), and runs the trained
-    motion_prior + decoder under ``torch.no_grad``. teacher_obs groups
-    are ignored — at deploy time they aren't available.
+    Three inference paths are supported:
+
+    * ``"encoder_a"`` (Path 1) — flat-env training path:
+      ``encoder_a(teacher_a_obs) → enc_mu → decoder([prop, enc_mu])``.
+      Identical to train rollout (modulo reparameterize sampling and
+      obs corruption noise).
+    * ``"encoder_b"`` (Path 2) — rough-env training path:
+      ``encoder_b(teacher_b_obs) → enc_mu → decoder([prop, enc_mu])``.
+    * ``"deploy"`` (Path 3) — proprio-only deployment:
+      ``motion_prior(prop) → mp_mu → decoder([prop, mp_mu])``. teacher
+      obs are not consumed even if present in the TensorDict.
+
+    Resolution order for the selected path:
+
+      1. Explicit ``path=`` kwarg
+      2. ``MJLAB_MP_INFERENCE_PATH`` environment variable
+      3. Auto-detect from obs at first call: prefer ``encoder_a`` if the
+         env exposes ``teacher_a``, else ``encoder_b`` if it exposes
+         ``teacher_b``, else fall back to ``deploy``
+
+    Auto is the default and matches the train rollout path on whichever
+    env (flat or rough) ``mjlab.scripts.play`` is driving.
     """
     from mjlab.tasks.motion_prior.onnx import build_deploy_model
 
-    deploy = build_deploy_model(self.policy)
-    if device is not None:
-      deploy = deploy.to(device)
-    deploy.eval()
+    if path is None:
+      env_path = os.environ.get("MJLAB_MP_INFERENCE_PATH", "").strip().lower()
+      if env_path and env_path != "auto":
+        path = env_path
+    if path is not None and path not in {"encoder_a", "encoder_b", "deploy"}:
+      raise ValueError(
+        f"Unknown inference path: {path!r}. Expected one of "
+        "'encoder_a', 'encoder_b', 'deploy', or None for auto."
+      )
+
+    # Lazily-built deploy module: we only construct + deepcopy weights when
+    # the deploy path is actually selected (saves ~30 MB on play if user
+    # is exclusively walking encoder paths).
+    deploy_holder: list = []
+
+    def _deploy_call(prop: torch.Tensor) -> torch.Tensor:
+      if not deploy_holder:
+        m = build_deploy_model(self.policy)
+        if device is not None:
+          m = m.to(device)
+        m.eval()
+        deploy_holder.append(m)
+      return deploy_holder[0](prop)
+
+    def _resolve_path(obs_td) -> str:
+      if path is not None:
+        return path
+      keys = set(obs_td.keys())
+      if "teacher_a" in keys:
+        return "encoder_a"
+      if "teacher_b" in keys:
+        return "encoder_b"
+      return "deploy"
 
     def _policy(obs_td) -> torch.Tensor:
       prop = _t(obs_td, "student")
+      chosen = _resolve_path(obs_td)
       with torch.no_grad():
-        return deploy(prop)
+        if chosen == "encoder_a":
+          return self.policy.policy_inference_a(prop, _t(obs_td, "teacher_a"))
+        if chosen == "encoder_b":
+          return self.policy.policy_inference_b(prop, _t(obs_td, "teacher_b"))
+        return _deploy_call(prop)
 
     return _policy
 

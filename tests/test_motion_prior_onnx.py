@@ -179,7 +179,7 @@ class _FakeFlatEnv:
     raise NotImplementedError
 
 
-def test_runner_get_inference_policy_path3(monkeypatch, tmp_path: Path) -> None:
+def _build_runner_with_fake_env(monkeypatch, tmp_path: Path):
   ta, tb = _ckpts_or_skip()
   from mjlab.tasks.motion_prior.rl import runner as runner_mod
   from mjlab.tasks.motion_prior.rl.runner import MotionPriorOnPolicyRunner
@@ -189,8 +189,7 @@ def test_runner_get_inference_policy_path3(monkeypatch, tmp_path: Path) -> None:
     "_build_secondary_env",
     lambda *a, **k: _FakeFlatEnv(),
   )
-
-  runner = MotionPriorOnPolicyRunner(
+  return MotionPriorOnPolicyRunner(
     env=_FakeFlatEnv(),  # type: ignore[arg-type]
     train_cfg={
       "num_steps_per_env": 4,
@@ -212,18 +211,80 @@ def test_runner_get_inference_policy_path3(monkeypatch, tmp_path: Path) -> None:
     device="cpu",
   )
 
+
+def test_inference_policy_auto_picks_encoder_a_when_teacher_a_in_obs(
+  monkeypatch, tmp_path: Path
+) -> None:
+  """Default (auto) path: teacher_a present → encoder_a (Path 1)."""
+  runner = _build_runner_with_fake_env(monkeypatch, tmp_path)
+
+  # Capture which sub-method gets called.
+  calls: list[str] = []
+
+  def _spy_a(prop, ta_obs):
+    calls.append("encoder_a")
+    return torch.zeros(prop.shape[0], NUM_ACTIONS)
+
+  def _spy_b(prop, tb_obs):
+    calls.append("encoder_b")
+    return torch.zeros(prop.shape[0], NUM_ACTIONS)
+
+  monkeypatch.setattr(runner.policy, "policy_inference_a", _spy_a)
+  monkeypatch.setattr(runner.policy, "policy_inference_b", _spy_b)
+
   policy = runner.get_inference_policy()
+  obs = runner.env.get_observations()  # has teacher_a + teacher_a_history
+  policy(obs)
+  assert calls == ["encoder_a"]
+
+
+def test_inference_policy_explicit_deploy_path(monkeypatch, tmp_path: Path) -> None:
+  """``path='deploy'`` forces Path 3 even when teacher obs are available."""
+  runner = _build_runner_with_fake_env(monkeypatch, tmp_path)
+
+  policy = runner.get_inference_policy(path="deploy")
   obs = runner.env.get_observations()
   action = policy(obs)
   assert action.shape == (runner.env.num_envs, NUM_ACTIONS)
 
-  # Drop teacher groups entirely — Path 3 must still work because deploy
-  # only consumes ``student``.
+  # Path 3 must also work without teacher groups.
   obs_no_teacher = TensorDict(
     {"student": obs["student"]}, batch_size=[runner.env.num_envs]
   )
   action_again = policy(obs_no_teacher)
   assert action_again.shape == (runner.env.num_envs, NUM_ACTIONS)
+
+
+def test_inference_policy_env_var_override(monkeypatch, tmp_path: Path) -> None:
+  """``MJLAB_MP_INFERENCE_PATH=deploy`` overrides auto when no kwarg given."""
+  runner = _build_runner_with_fake_env(monkeypatch, tmp_path)
+
+  monkeypatch.setenv("MJLAB_MP_INFERENCE_PATH", "deploy")
+  policy = runner.get_inference_policy()  # no path kwarg
+  obs = runner.env.get_observations()
+  action = policy(obs)
+  assert action.shape == (runner.env.num_envs, NUM_ACTIONS)
+
+
+def test_inference_policy_auto_falls_back_to_deploy(
+  monkeypatch, tmp_path: Path
+) -> None:
+  """Without teacher_a / teacher_b in obs, auto resolves to deploy."""
+  runner = _build_runner_with_fake_env(monkeypatch, tmp_path)
+
+  policy = runner.get_inference_policy()
+  obs = TensorDict(
+    {"student": torch.randn(runner.env.num_envs, PROP_OBS_DIM)},
+    batch_size=[runner.env.num_envs],
+  )
+  action = policy(obs)
+  assert action.shape == (runner.env.num_envs, NUM_ACTIONS)
+
+
+def test_inference_policy_rejects_unknown_path(monkeypatch, tmp_path: Path) -> None:
+  runner = _build_runner_with_fake_env(monkeypatch, tmp_path)
+  with pytest.raises(ValueError, match="Unknown inference path"):
+    runner.get_inference_policy(path="nope")
 
 
 def test_runner_export_policy_to_onnx(monkeypatch, tmp_path: Path) -> None:
