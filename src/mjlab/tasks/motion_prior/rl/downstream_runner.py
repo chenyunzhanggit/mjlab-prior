@@ -140,6 +140,10 @@ class DownStreamOnPolicyRunner:
     self._len_buf: deque[float] = deque(maxlen=100)
     self._cur_rew = torch.zeros(self.env.num_envs, device=device)
     self._cur_len = torch.zeros(self.env.num_envs, device=device)
+    # Per-term episodic-reward log: ``Episode_Reward/<name> -> deque`` of
+    # values reported by ``RewardManager.reset`` on each env reset (already
+    # normalized by ``max_episode_length_s``).
+    self._episode_log: dict[str, deque[float]] = {}
 
   def _build_policy(
     self,
@@ -223,9 +227,10 @@ class DownStreamOnPolicyRunner:
       critic_obs = _t(obs, "critic")
 
       action = self.alg.act(policy_obs, prop_obs, critic_obs)
-      obs, rew, dones, _ = self.env.step(action)
+      obs, rew, dones, extras = self.env.step(action)
       self.alg.process_env_step(rew, dones)
       self._track_episode_stats(rew, dones)
+      self._track_episode_log(extras)
     return obs
 
   def _track_episode_stats(self, rew: torch.Tensor, done: torch.Tensor) -> None:
@@ -237,6 +242,32 @@ class DownStreamOnPolicyRunner:
       self._len_buf.extend(self._cur_len[done_idx].tolist())
       self._cur_rew[done_idx] = 0.0
       self._cur_len[done_idx] = 0.0
+
+  def _track_episode_log(self, extras: dict) -> None:
+    """Drain ``extras['log']`` into per-key rolling buffers.
+
+    Mjlab's ``RewardManager.reset`` puts ``Episode_Reward/<name>`` floats
+    in here (already normalized by ``max_episode_length_s``) on every
+    env reset; ``TerminationManager`` / ``CommandManager`` add
+    ``Episode_Termination/*`` and command metrics. We accumulate them so
+    ``_log_iteration`` can print averaged per-term values.
+    """
+    log = extras.get("log") if isinstance(extras, dict) else None
+    if not log:
+      return
+    for k, v in log.items():
+      if torch.is_tensor(v):
+        v = float(v.item())
+      else:
+        try:
+          v = float(v)
+        except (TypeError, ValueError):
+          continue
+      buf = self._episode_log.get(k)
+      if buf is None:
+        buf = deque(maxlen=100)
+        self._episode_log[k] = buf
+      buf.append(v)
 
   # ------------------------------------------------------------------ #
   # logging                                                             #
@@ -260,6 +291,24 @@ class DownStreamOnPolicyRunner:
       f"rew={rew:.2f} len={length:.0f} "
       f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
     )
+
+    # Per-reward-term breakdown (Episode_Reward/* from RewardManager).
+    # Sorted by absolute mean so the loudest terms float to the top.
+    reward_items: list[tuple[str, float]] = []
+    other_items: list[tuple[str, float]] = []
+    for k, buf in self._episode_log.items():
+      if not buf:
+        continue
+      mean = statistics.fmean(buf)
+      if k.startswith("Episode_Reward/"):
+        reward_items.append((k.removeprefix("Episode_Reward/"), mean))
+      else:
+        other_items.append((k, mean))
+    if reward_items:
+      reward_items.sort(key=lambda kv: -abs(kv[1]))
+      breakdown = "  ".join(f"{name}={val:+.3f}" for name, val in reward_items)
+      print(f"  rewards: {breakdown}")
+
     if self._writer is not None:
       for k, v in loss_dict.items():
         self._writer.add_scalar(k, v, it)
@@ -267,6 +316,11 @@ class DownStreamOnPolicyRunner:
       self._writer.add_scalar("episode/length", length, it)
       self._writer.add_scalar("time/collect", collect_t, it)
       self._writer.add_scalar("time/learn", learn_t, it)
+      # Forward every Episode_Reward/* + other manager-reported scalar.
+      for k, v in reward_items:
+        self._writer.add_scalar(f"Episode_Reward/{k}", v, it)
+      for k, v in other_items:
+        self._writer.add_scalar(k, v, it)
 
   # ------------------------------------------------------------------ #
   # save / load                                                         #
