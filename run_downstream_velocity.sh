@@ -20,7 +20,7 @@ set -euo pipefail
 # ============================================================================
 
 # VAE motion-prior ckpt (used by MODE=smoke / MODE=full).
-MOTION_PRIOR_CKPT="${MOTION_PRIOR_CKPT:-/home/bcj/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior/<timestamp>/model_xxx.pt}"
+MOTION_PRIOR_CKPT="${MOTION_PRIOR_CKPT:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior/2026-04-29_22-52-01/model_19999.pt}"
 
 # VQ motion-prior ckpt (used by MODE=vq). Edit when you have a VQ run.
 MOTION_PRIOR_VQ_CKPT="${MOTION_PRIOR_VQ_CKPT:-/home/bcj/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior_vq/<timestamp>/model_xxx.pt}"
@@ -29,10 +29,10 @@ MOTION_PRIOR_VQ_CKPT="${MOTION_PRIOR_VQ_CKPT:-/home/bcj/zcy/mjlab-prior/logs/rsl
 # Tunable knobs (env-var overridable).
 # ============================================================================
 
-MODE="${MODE:-smoke}"               # smoke / full / vq
+MODE="${MODE:-full}"               # smoke / full / vq
 NUM_ENVS="${NUM_ENVS:-}"             # leave empty to let MODE pick a default
 MAX_ITER="${MAX_ITER:-}"             # same
-SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 LR="${LR:-1e-3}"
 ENTROPY_COEF="${ENTROPY_COEF:-0.005}"
 NUM_STEPS_PER_ENV="${NUM_STEPS_PER_ENV:-24}"
@@ -53,7 +53,7 @@ case "$MODE" in
   full)
     TASK="Mjlab-Downstream-Velocity-Unitree-G1"
     CKPT="$MOTION_PRIOR_CKPT"
-    : "${NUM_ENVS:=4096}"
+    : "${NUM_ENVS:=2048}"
     : "${MAX_ITER:=100000}"
     ;;
   vq)
