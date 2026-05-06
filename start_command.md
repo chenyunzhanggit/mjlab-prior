@@ -16,3 +16,7 @@ uv run python -m mjlab.scripts.train  Mjlab-MotionPrior-VQ-Flat-Unitree-G1 --env
 flat tracking latent + mp + prop_obs: play_motion_prior_vq_flat.sh
 rough locomotion latent + mp + prop_obs: play_motion_prior_vq_rough.sh
 only mp + prop_obs: play_motion_prior_vq_deploy.sh (change the task in this bash to change the FLAT or ROUGH)
+
+DownStream Task:
+VAE: run_downstream_velocity.sh
+VQ-VAE: run_downstream_velocity_vq.sh

@@ -121,6 +121,21 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   """G1 velocity-tracking downstream env on rough terrain."""
   cfg = unitree_g1_rough_env_cfg(play=play)
 
+  cfg.rewards["track_linear_velocity"].weight = 2.0
+  cfg.rewards["track_angular_velocity"].weight = 2.0       
+  cfg.rewards["upright"].weight = 0.0       
+  cfg.rewards["pose"].weight = 0.0       
+  cfg.rewards["body_ang_vel"].weight = 0.0       
+  cfg.rewards["angular_momentum"].weight = 0.0       
+  cfg.rewards["dof_pos_limits"].weight = 0.0       
+  cfg.rewards["action_rate_l2"].weight = 0.0       
+  cfg.rewards["air_time"].weight = 0.0       
+  cfg.rewards["foot_clearance"].weight = 0.0       
+  cfg.rewards["foot_swing_height"].weight = 0.0        
+  cfg.rewards["foot_slip"].weight = 0.0 
+  cfg.rewards["soft_landing"].weight = 0.0 
+  cfg.rewards["self_collisions"].weight = 0.0                                                                      
+                        
   enable_corruption = not play
   cfg.observations = {
     # Frozen ``motion_prior`` MLP input — schema fixed by motion-prior training.

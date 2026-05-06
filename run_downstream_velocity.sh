@@ -23,7 +23,7 @@ set -euo pipefail
 MOTION_PRIOR_CKPT="${MOTION_PRIOR_CKPT:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior/2026-04-29_22-52-01/model_19999.pt}"
 
 # VQ motion-prior ckpt (used by MODE=vq). Edit when you have a VQ run.
-MOTION_PRIOR_VQ_CKPT="${MOTION_PRIOR_VQ_CKPT:-/home/bcj/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior_vq/<timestamp>/model_xxx.pt}"
+MOTION_PRIOR_VQ_CKPT="${MOTION_PRIOR_VQ_CKPT:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/2026-05-06_15-39-54/model_9000.pt}"
 
 # ============================================================================
 # Tunable knobs (env-var overridable).
@@ -53,13 +53,13 @@ case "$MODE" in
   full)
     TASK="Mjlab-Downstream-Velocity-Unitree-G1"
     CKPT="$MOTION_PRIOR_CKPT"
-    : "${NUM_ENVS:=2048}"
+    : "${NUM_ENVS:=3500}"
     : "${MAX_ITER:=100000}"
     ;;
   vq)
     TASK="Mjlab-Downstream-VQ-Velocity-Unitree-G1"
     CKPT="$MOTION_PRIOR_VQ_CKPT"
-    : "${NUM_ENVS:=4096}"
+    : "${NUM_ENVS:=3500}"
     : "${MAX_ITER:=100000}"
     ;;
   *)

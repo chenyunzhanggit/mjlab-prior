@@ -287,7 +287,22 @@ class BaseViewer(ABC):
     try:
       with torch.no_grad():
         obs = self.env.get_observations()
+        # prop = obs["student"]                                     
+        # scan = prop[0, -187:]                   
+        # print(
+        #   f"[scan] mean={scan.mean().item():+.4f} "                                                                                                            
+        #   f"std={scan.std().item():.4f} "       
+        #   f"min={scan.min().item():+.4f} max={scan.max().item():+.4f}"                                                                                         
+        # ) 
 
+        prop = obs["student"]                                                                                                                                
+        # 5 proprio × history 4 在前面,height_scan 187 在后面。                                                                                                
+        # 每个 proprio term 的"最新帧"取 history stack 的最后一段:                                                                                           
+        pg   = prop[0,    9: 12]    # latest projected_gravity (3)                                                                                             
+        bav  = prop[0,   21: 24]    # latest base_ang_vel (3)                                                                                                  
+        jvel = prop[0,  168:197]    # latest joint_vel (29)  — 4 frames × (3+3+29) = 140 起,joint_vel 在 (3+3+29)*3+(3+3+29)+3+3 ... 算偏移自己确认下          
+        print(f"|jvel|={jvel.norm().item():.3f} |bav|={bav.norm().item():.3f}")  
+        
         actions = self.policy(obs)
         self.env.step(actions)
         self._step_count += 1
