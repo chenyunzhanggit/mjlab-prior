@@ -87,24 +87,34 @@ class RslRlMotionPriorVQPolicyCfg:
 
 @dataclass
 class RslRlMotionPriorVQAlgoCfg:
-  """Loss weights and optimizer knobs for the VQ-VAE distillation."""
+  """Loss weights and optimizer knobs for the VQ-VAE distillation.
+
+  Defaults aligned to the upstream ``motionprior`` reference's VQ algorithm:
+  unit weights on commit / mp losses, AR(1) disabled (upstream's live
+  ``update`` path never applied AR(1)), Adam ``lr=1e-3``, no gradient
+  clipping. AR(1) can be re-enabled by setting ``mu_regu_loss_coeff > 0``.
+  """
 
   loss_type: Literal["mse", "huber"] = "mse"
-  learning_rate: float = 5.0e-4
-  max_grad_norm: float = 1.0
+  learning_rate: float = 1.0e-3
+  max_grad_norm: float | None = None
   num_learning_epochs: int = 5
 
   behavior_weight_a: float = 1.0
   behavior_weight_b: float = 1.0
 
-  mu_regu_loss_coeff: float = 0.01
+  mu_regu_loss_coeff: float = 0.0
+  """AR(1) coefficient on raw encoder outputs. 0.0 = disabled (upstream
+  parity); set e.g. 0.01 to re-enable temporal smoothing."""
   ar1_phi: float = 0.99
 
-  commit_loss_coeff: float = 0.25
-  """Standard VQ-VAE β commitment-loss weight."""
+  commit_loss_coeff: float = 1.0
+  """VQ commitment-loss weight (β). Upstream uses an implicit 1.0; the
+  textbook VQ-VAE β=0.25 can be set explicitly if desired."""
 
-  mp_loss_coeff: float = 0.1
-  """Weight on the motion_prior code-prediction MSE."""
+  mp_loss_coeff: float = 1.0
+  """Weight on the motion_prior code-prediction MSE. Upstream uses
+  implicit 1.0."""
 
   class_name: str = "DistillationMotionPriorVQ"
 

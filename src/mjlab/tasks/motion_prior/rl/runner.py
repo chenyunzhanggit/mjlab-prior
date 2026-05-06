@@ -647,15 +647,16 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
       loss_type=str(algo_cfg.get("loss_type", "mse")),
       behavior_weight_a=float(algo_cfg.get("behavior_weight_a", 1.0)),
       behavior_weight_b=float(algo_cfg.get("behavior_weight_b", 1.0)),
-      mu_regu_loss_coeff=float(algo_cfg.get("mu_regu_loss_coeff", 0.01)),
+      # Upstream-aligned defaults: AR(1) off, commit/mp coeffs at 1.0.
+      mu_regu_loss_coeff=float(algo_cfg.get("mu_regu_loss_coeff", 0.0)),
       ar1_phi=float(algo_cfg.get("ar1_phi", 0.99)),
-      commit_loss_coeff=float(algo_cfg.get("commit_loss_coeff", 0.25)),
-      mp_loss_coeff=float(algo_cfg.get("mp_loss_coeff", 0.1)),
+      commit_loss_coeff=float(algo_cfg.get("commit_loss_coeff", 1.0)),
+      mp_loss_coeff=float(algo_cfg.get("mp_loss_coeff", 1.0)),
     )
     self.alg = DistillationMotionPriorVQ(
       self.policy,
-      learning_rate=float(algo_cfg.get("learning_rate", 5e-4)),
-      max_grad_norm=algo_cfg.get("max_grad_norm", 1.0),
+      learning_rate=float(algo_cfg.get("learning_rate", 1e-3)),
+      max_grad_norm=algo_cfg.get("max_grad_norm", None),
       loss_cfg=loss_cfg,
       device=device,
     )
