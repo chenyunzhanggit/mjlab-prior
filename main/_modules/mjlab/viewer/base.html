@@ -702,7 +702,22 @@ document.write(`
     <span class="k">try</span><span class="p">:</span>
       <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
         <span class="n">obs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">get_observations</span><span class="p">()</span>
+        <span class="c1"># prop = obs[&quot;student&quot;]                                     </span>
+        <span class="c1"># scan = prop[0, -187:]                   </span>
+        <span class="c1"># print(</span>
+        <span class="c1">#   f&quot;[scan] mean={scan.mean().item():+.4f} &quot;                                                                                                            </span>
+        <span class="c1">#   f&quot;std={scan.std().item():.4f} &quot;       </span>
+        <span class="c1">#   f&quot;min={scan.min().item():+.4f} max={scan.max().item():+.4f}&quot;                                                                                         </span>
+        <span class="c1"># ) </span>
 
+        <span class="n">prop</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s2">&quot;student&quot;</span><span class="p">]</span>                                                                                                                                
+        <span class="c1"># 5 proprio × history 4 在前面,height_scan 187 在后面。                                                                                                </span>
+        <span class="c1"># 每个 proprio term 的&quot;最新帧&quot;取 history stack 的最后一段:                                                                                           </span>
+        <span class="n">pg</span>   <span class="o">=</span> <span class="n">prop</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span>    <span class="mi">9</span><span class="p">:</span> <span class="mi">12</span><span class="p">]</span>    <span class="c1"># latest projected_gravity (3)                                                                                             </span>
+        <span class="n">bav</span>  <span class="o">=</span> <span class="n">prop</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span>   <span class="mi">21</span><span class="p">:</span> <span class="mi">24</span><span class="p">]</span>    <span class="c1"># latest base_ang_vel (3)                                                                                                  </span>
+        <span class="n">jvel</span> <span class="o">=</span> <span class="n">prop</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span>  <span class="mi">168</span><span class="p">:</span><span class="mi">197</span><span class="p">]</span>    <span class="c1"># latest joint_vel (29)  — 4 frames × (3+3+29) = 140 起,joint_vel 在 (3+3+29)*3+(3+3+29)+3+3 ... 算偏移自己确认下          </span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;|jvel|=</span><span class="si">{</span><span class="n">jvel</span><span class="o">.</span><span class="n">norm</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> |bav|=</span><span class="si">{</span><span class="n">bav</span><span class="o">.</span><span class="n">norm</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>  
+        
         <span class="n">actions</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">policy</span><span class="p">(</span><span class="n">obs</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">actions</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_step_count</span> <span class="o">+=</span> <span class="mi">1</span>
