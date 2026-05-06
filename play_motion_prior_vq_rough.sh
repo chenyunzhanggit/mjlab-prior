@@ -17,8 +17,8 @@
 set -euo pipefail
 
 # ---- override via env vars or edit defaults below ----
-RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/CHANGE_ME}"
-CKPT="${CKPT:-model_19999.pt}"
+RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/2026-05-06_13-39-15}"
+CKPT="${CKPT:-model_1500.pt}"
 TEACHER_A="${TEACHER_A:-/home/lenovo/project/Teleopit/track.pt}"
 TEACHER_B="${TEACHER_B:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_velocity/2026-04-28_16-16-06/model_21000.pt}"
 NUM_ENVS="${NUM_ENVS:-1}"

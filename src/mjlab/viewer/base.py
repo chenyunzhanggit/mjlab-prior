@@ -287,6 +287,7 @@ class BaseViewer(ABC):
     try:
       with torch.no_grad():
         obs = self.env.get_observations()
+
         actions = self.policy(obs)
         self.env.step(actions)
         self._step_count += 1

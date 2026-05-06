@@ -224,6 +224,7 @@ class MotionPriorOnPolicyRunner:
 
       t1 = time.time()
       loss_dict: dict[str, float] = {}
+
       for _ in range(self.num_learning_epochs):
         loss_dict = self._epoch_step(rollout, cur_iter_num=it)
       learn_t = time.time() - t1
