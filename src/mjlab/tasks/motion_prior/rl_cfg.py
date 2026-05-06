@@ -69,3 +69,63 @@ class RslRlMotionPriorRunnerCfg(RslRlBaseRunnerCfg):
 
   policy: RslRlMotionPriorPolicyCfg = field(default_factory=RslRlMotionPriorPolicyCfg)
   algorithm: RslRlMotionPriorAlgoCfg = field(default_factory=RslRlMotionPriorAlgoCfg)
+
+
+@dataclass
+class RslRlMotionPriorVQPolicyCfg:
+  """Hidden-dim / codebook spec for the dual-encoder VQ-VAE policy."""
+
+  encoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  decoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  motion_prior_hidden_dims: tuple[int, ...] = (512, 256, 128)
+  num_code: int = 2048
+  code_dim: int = 64
+  ema_decay: float = 0.99
+  activation: str = "elu"
+  class_name: str = "MotionPriorVQPolicy"
+
+
+@dataclass
+class RslRlMotionPriorVQAlgoCfg:
+  """Loss weights and optimizer knobs for the VQ-VAE distillation."""
+
+  loss_type: Literal["mse", "huber"] = "mse"
+  learning_rate: float = 5.0e-4
+  max_grad_norm: float = 1.0
+  num_learning_epochs: int = 5
+
+  behavior_weight_a: float = 1.0
+  behavior_weight_b: float = 1.0
+
+  mu_regu_loss_coeff: float = 0.01
+  ar1_phi: float = 0.99
+
+  commit_loss_coeff: float = 0.25
+  """Standard VQ-VAE β commitment-loss weight."""
+
+  mp_loss_coeff: float = 0.1
+  """Weight on the motion_prior code-prediction MSE."""
+
+  class_name: str = "DistillationMotionPriorVQ"
+
+
+@dataclass
+class RslRlMotionPriorVQRunnerCfg(RslRlBaseRunnerCfg):
+  """Top-level config for the dual-env VQ-VAE motion-prior runner."""
+
+  class_name: str = "MotionPriorVQOnPolicyRunner"
+
+  secondary_task_id: str = "Mjlab-MotionPrior-Rough-Unitree-G1"
+  """Task ID of the rough env (teacher_b's training distribution)."""
+  secondary_num_envs: int = 1
+  """Number of envs for the rough env. Defaults match a typical primary."""
+
+  teacher_a_policy_path: str = "~/zcy/Teleopit/track.pt"
+  teacher_b_policy_path: str = "~/zcy/mjlab-prior/logs/model_21000.pt"
+
+  policy: RslRlMotionPriorVQPolicyCfg = field(
+    default_factory=RslRlMotionPriorVQPolicyCfg
+  )
+  algorithm: RslRlMotionPriorVQAlgoCfg = field(
+    default_factory=RslRlMotionPriorVQAlgoCfg
+  )

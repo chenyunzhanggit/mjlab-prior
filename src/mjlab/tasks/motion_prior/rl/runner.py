@@ -21,7 +21,7 @@ import statistics
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from rsl_rl.env import VecEnv
@@ -35,6 +35,14 @@ from mjlab.tasks.motion_prior.rl.algorithms.distillation_motion_prior import (
 )
 from mjlab.tasks.motion_prior.rl.policies import MotionPriorPolicy
 from mjlab.tasks.registry import load_env_cfg
+
+if TYPE_CHECKING:
+  from mjlab.tasks.motion_prior.rl.algorithms.distillation_motion_prior_vq import (
+    DistillationMotionPriorVQ,
+  )
+  from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
+    MotionPriorVQPolicy,
+  )
 
 
 def _build_secondary_env(
@@ -63,6 +71,7 @@ class MotionPriorOnPolicyRunner:
   """Dual-env VAE motion-prior distillation runner."""
 
   env: RslRlVecEnvWrapper
+  policy: MotionPriorPolicy
   alg: DistillationMotionPrior
 
   def __init__(
@@ -99,51 +108,15 @@ class MotionPriorOnPolicyRunner:
     )
     self.env_b = _build_secondary_env(secondary_task_id, secondary_num_envs, device)
 
-    # ----- Policy ---------------------------------------------------------
-    teacher_a_path = train_cfg["teacher_a_policy_path"]
-    teacher_b_path = train_cfg["teacher_b_policy_path"]
+    # ----- Policy + Algorithm (overridable hook for VQ subclass) ---------
     student_obs_dim = _t(self.env.get_observations(), "student").shape[-1]
     num_actions = int(self.env.num_actions)
-    policy_cfg = train_cfg.get("policy", {})
-
-    self.policy = MotionPriorPolicy(
-      prop_obs_dim=student_obs_dim,
+    self._build_policy_and_alg(
+      train_cfg=train_cfg,
+      student_obs_dim=student_obs_dim,
       num_actions=num_actions,
-      teacher_a_policy_path=teacher_a_path,
-      teacher_b_policy_path=teacher_b_path,
-      encoder_hidden_dims=tuple(policy_cfg.get("encoder_hidden_dims", (512, 256, 128))),
-      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
-      motion_prior_hidden_dims=tuple(
-        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
-      ),
-      latent_z_dims=int(policy_cfg.get("latent_z_dims", 32)),
-      activation=str(policy_cfg.get("activation", "elu")),
       device=device,
     )
-    self._latent_z_dims = self.policy.latent_z_dims
-
-    # ----- Algorithm ------------------------------------------------------
-    algo_cfg = train_cfg.get("algorithm", {})
-    loss_cfg = DistillationLossCfg(
-      loss_type=str(algo_cfg.get("loss_type", "mse")),
-      behavior_weight_a=float(algo_cfg.get("behavior_weight_a", 1.0)),
-      behavior_weight_b=float(algo_cfg.get("behavior_weight_b", 1.0)),
-      mu_regu_loss_coeff=float(algo_cfg.get("mu_regu_loss_coeff", 0.01)),
-      ar1_phi=float(algo_cfg.get("ar1_phi", 0.99)),
-      kl_loss_coeff_max=float(algo_cfg.get("kl_loss_coeff_max", 0.01)),
-      kl_loss_coeff_min=float(algo_cfg.get("kl_loss_coeff_min", 0.001)),
-      anneal_start_iter=int(algo_cfg.get("anneal_start_iter", 2500)),
-      anneal_end_iter=int(algo_cfg.get("anneal_end_iter", 5000)),
-      align_loss_coeff=float(algo_cfg.get("align_loss_coeff", 0.0)),
-    )
-    self.alg = DistillationMotionPrior(
-      self.policy,
-      learning_rate=float(algo_cfg.get("learning_rate", 5e-4)),
-      max_grad_norm=algo_cfg.get("max_grad_norm", 1.0),
-      loss_cfg=loss_cfg,
-      device=device,
-    )
-    self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
 
     # ----- Rollout knobs --------------------------------------------------
     self.num_steps_per_env = int(train_cfg.get("num_steps_per_env", 24))
@@ -169,6 +142,61 @@ class MotionPriorOnPolicyRunner:
     self._cur_len_a = torch.zeros(self.env.num_envs, device=device)
     self._cur_rew_b = torch.zeros(self.env_b.num_envs, device=device)
     self._cur_len_b = torch.zeros(self.env_b.num_envs, device=device)
+
+  # --------------------------------------------------------------------- #
+  # Policy / algorithm construction (overridable by VQ subclass)          #
+  # --------------------------------------------------------------------- #
+
+  def _build_policy_and_alg(
+    self,
+    *,
+    train_cfg: dict,
+    student_obs_dim: int,
+    num_actions: int,
+    device: str,
+  ) -> None:
+    """Build the VAE policy + algorithm. VQ subclass overrides."""
+    teacher_a_path = train_cfg["teacher_a_policy_path"]
+    teacher_b_path = train_cfg["teacher_b_policy_path"]
+    policy_cfg = train_cfg.get("policy", {})
+
+    self.policy = MotionPriorPolicy(
+      prop_obs_dim=student_obs_dim,
+      num_actions=num_actions,
+      teacher_a_policy_path=teacher_a_path,
+      teacher_b_policy_path=teacher_b_path,
+      encoder_hidden_dims=tuple(policy_cfg.get("encoder_hidden_dims", (512, 256, 128))),
+      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
+      motion_prior_hidden_dims=tuple(
+        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
+      ),
+      latent_z_dims=int(policy_cfg.get("latent_z_dims", 32)),
+      activation=str(policy_cfg.get("activation", "elu")),
+      device=device,
+    )
+    self._latent_z_dims = self.policy.latent_z_dims
+
+    algo_cfg = train_cfg.get("algorithm", {})
+    loss_cfg = DistillationLossCfg(
+      loss_type=str(algo_cfg.get("loss_type", "mse")),
+      behavior_weight_a=float(algo_cfg.get("behavior_weight_a", 1.0)),
+      behavior_weight_b=float(algo_cfg.get("behavior_weight_b", 1.0)),
+      mu_regu_loss_coeff=float(algo_cfg.get("mu_regu_loss_coeff", 0.01)),
+      ar1_phi=float(algo_cfg.get("ar1_phi", 0.99)),
+      kl_loss_coeff_max=float(algo_cfg.get("kl_loss_coeff_max", 0.01)),
+      kl_loss_coeff_min=float(algo_cfg.get("kl_loss_coeff_min", 0.001)),
+      anneal_start_iter=int(algo_cfg.get("anneal_start_iter", 2500)),
+      anneal_end_iter=int(algo_cfg.get("anneal_end_iter", 5000)),
+      align_loss_coeff=float(algo_cfg.get("align_loss_coeff", 0.0)),
+    )
+    self.alg = DistillationMotionPrior(
+      self.policy,
+      learning_rate=float(algo_cfg.get("learning_rate", 5e-4)),
+      max_grad_norm=algo_cfg.get("max_grad_norm", 1.0),
+      loss_cfg=loss_cfg,
+      device=device,
+    )
+    self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
 
   # --------------------------------------------------------------------- #
   # train.py interface                                                    #
@@ -217,6 +245,24 @@ class MotionPriorOnPolicyRunner:
   # Rollout                                                               #
   # --------------------------------------------------------------------- #
 
+  def _policy_step_actions(
+    self, obs_a: TensorDict, obs_b: TensorDict
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(student_action_a, student_action_b)`` for env stepping.
+
+    VAE policy: ``forward_*`` returns
+    ``(enc_mu, enc_log_var, z, student_act, mp_mu, mp_log_var)``; we want
+    the 4th element. VQ subclass overrides because its ``forward_*``
+    returns a different tuple.
+    """
+    _, _, _, sa_a_step, _, _ = self.policy.forward_a(
+      _t(obs_a, "student"), _t(obs_a, "teacher_a")
+    )
+    _, _, _, sa_b_step, _, _ = self.policy.forward_b(
+      _t(obs_b, "student"), _t(obs_b, "teacher_b")
+    )
+    return sa_a_step, sa_b_step
+
   def _collect_rollout(
     self, obs_a: TensorDict, obs_b: TensorDict
   ) -> tuple[dict[str, torch.Tensor], TensorDict, TensorDict]:
@@ -242,12 +288,7 @@ class MotionPriorOnPolicyRunner:
       with torch.no_grad():
         # Sample student actions for stepping; gradients are reconstructed
         # in the per-epoch re-forward.
-        _, _, _, sa_a_step, _, _ = self.policy.forward_a(
-          _t(obs_a, "student"), _t(obs_a, "teacher_a")
-        )
-        _, _, _, sa_b_step, _, _ = self.policy.forward_b(
-          _t(obs_b, "student"), _t(obs_b, "teacher_b")
-        )
+        sa_a_step, sa_b_step = self._policy_step_actions(obs_a, obs_b)
         # Frozen teacher targets — never need grad.
         teacher_a_action = self.policy.evaluate_a(
           _t(obs_a, "teacher_a"), _t(obs_a, "teacher_a_history")
@@ -545,12 +586,176 @@ class MotionPriorOnPolicyRunner:
 class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
   """VQ-VAE motion-prior runner.
 
-  Behaves identically to :class:`MotionPriorOnPolicyRunner` (same dual-env
-  rollout, same train loop) but the policy has different submodules:
-  ``MotionPriorVQPolicy`` carries a ``quantizer`` (codebook + EMA stats)
-  in place of ``mp_mu`` / ``mp_var``. ``save`` / ``load`` are overridden so
+  Same dual-env rollout / train loop as :class:`MotionPriorOnPolicyRunner`,
+  but the policy is a :class:`MotionPriorVQPolicy` (shared codebook +
+  decoder + motion_prior head, no μ/σ heads) and the algorithm is
+  :class:`DistillationMotionPriorVQ` (commit + AR(1) on raw encoder + mp
+  code regression, no KL / no align). ``save`` / ``load`` are overridden so
   the VQ-specific state_dict keys round-trip correctly.
   """
+
+  # Narrow the inherited attribute annotations to the VQ flavors so type
+  # checkers stop complaining about the VQ-specific call sites below.
+  policy: "MotionPriorVQPolicy"
+  alg: "DistillationMotionPriorVQ"
+
+  def _build_policy_and_alg(
+    self,
+    *,
+    train_cfg: dict,
+    student_obs_dim: int,
+    num_actions: int,
+    device: str,
+  ) -> None:
+    """Build the VQ policy + VQ algorithm from ``train_cfg`` (a plain dict
+    produced by ``dataclasses.asdict`` on ``RslRlMotionPriorVQRunnerCfg``).
+    """
+    from mjlab.tasks.motion_prior.rl.algorithms.distillation_motion_prior_vq import (
+      DistillationMotionPriorVQ,
+      DistillationVQLossCfg,
+    )
+    from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
+      MotionPriorVQPolicy,
+    )
+
+    teacher_a_path = train_cfg["teacher_a_policy_path"]
+    teacher_b_path = train_cfg["teacher_b_policy_path"]
+    policy_cfg = train_cfg.get("policy", {})
+
+    self.policy = MotionPriorVQPolicy(
+      prop_obs_dim=student_obs_dim,
+      num_actions=num_actions,
+      teacher_a_policy_path=teacher_a_path,
+      teacher_b_policy_path=teacher_b_path,
+      encoder_hidden_dims=tuple(policy_cfg.get("encoder_hidden_dims", (512, 256, 128))),
+      decoder_hidden_dims=tuple(policy_cfg.get("decoder_hidden_dims", (512, 256, 128))),
+      motion_prior_hidden_dims=tuple(
+        policy_cfg.get("motion_prior_hidden_dims", (512, 256, 128))
+      ),
+      num_code=int(policy_cfg.get("num_code", 2048)),
+      code_dim=int(policy_cfg.get("code_dim", 64)),
+      ema_decay=float(policy_cfg.get("ema_decay", 0.99)),
+      activation=str(policy_cfg.get("activation", "elu")),
+      device=device,
+    )
+    # AR(1) reshape uses code_dim (raw encoder output width) for VQ.
+    self._latent_z_dims = int(policy_cfg.get("code_dim", 64))
+
+    algo_cfg = train_cfg.get("algorithm", {})
+    loss_cfg = DistillationVQLossCfg(
+      loss_type=str(algo_cfg.get("loss_type", "mse")),
+      behavior_weight_a=float(algo_cfg.get("behavior_weight_a", 1.0)),
+      behavior_weight_b=float(algo_cfg.get("behavior_weight_b", 1.0)),
+      mu_regu_loss_coeff=float(algo_cfg.get("mu_regu_loss_coeff", 0.01)),
+      ar1_phi=float(algo_cfg.get("ar1_phi", 0.99)),
+      commit_loss_coeff=float(algo_cfg.get("commit_loss_coeff", 0.25)),
+      mp_loss_coeff=float(algo_cfg.get("mp_loss_coeff", 0.1)),
+    )
+    self.alg = DistillationMotionPriorVQ(
+      self.policy,
+      learning_rate=float(algo_cfg.get("learning_rate", 5e-4)),
+      max_grad_norm=algo_cfg.get("max_grad_norm", 1.0),
+      loss_cfg=loss_cfg,
+      device=device,
+    )
+    self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
+
+  def _policy_step_actions(
+    self, obs_a: TensorDict, obs_b: TensorDict
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """VQ ``forward_*`` returns
+    ``(student_act, q, enc, mp_code, commit_loss, perplexity)`` — student
+    action is the 1st element."""
+    sa_a_step, *_ = self.policy.forward_a(
+      _t(obs_a, "student"), _t(obs_a, "teacher_a"), training=False
+    )
+    sa_b_step, *_ = self.policy.forward_b(
+      _t(obs_b, "student"), _t(obs_b, "teacher_b"), training=False
+    )
+    return sa_a_step, sa_b_step
+
+  def _epoch_step(
+    self,
+    rollout: dict[str, torch.Tensor],
+    cur_iter_num: int,
+  ) -> dict[str, float]:
+    """Re-forward VQ trainable modules and apply one optimization step."""
+    n_envs_a = self.env.num_envs
+    n_envs_b = self.env_b.num_envs
+    T = self.num_steps_per_env
+    Z = self._latent_z_dims  # = code_dim for VQ
+
+    sa_a, q_a, enc_a, mp_code_a, commit_a, perplexity_a = self.policy.forward_a(
+      rollout["prop_obs_a"], rollout["teacher_a_obs"], training=True
+    )
+    sa_b, q_b, enc_b, mp_code_b, commit_b, perplexity_b = self.policy.forward_b(
+      rollout["prop_obs_b"], rollout["teacher_b_obs"], training=True
+    )
+    # ``training=True`` always produces a real commit_loss tensor.
+    assert commit_a is not None and commit_b is not None
+
+    # AR(1) on raw (pre-quantization) encoder outputs.
+    enc_a_t = enc_a.view(n_envs_a, T, Z)
+    enc_b_t = enc_b.view(n_envs_b, T, Z)
+
+    return self.alg.compute_loss_one_batch(
+      actions_teacher_a=rollout["actions_teacher_a"],
+      actions_student_a=sa_a,
+      enc_a=enc_a,
+      q_a=q_a,
+      mp_code_a=mp_code_a,
+      commit_a=commit_a,
+      perplexity_a=perplexity_a,
+      enc_a_time_stack=enc_a_t,
+      progress_buf_a=rollout["progress_buf_a"],
+      actions_teacher_b=rollout["actions_teacher_b"],
+      actions_student_b=sa_b,
+      enc_b=enc_b,
+      q_b=q_b,
+      mp_code_b=mp_code_b,
+      commit_b=commit_b,
+      perplexity_b=perplexity_b,
+      enc_b_time_stack=enc_b_t,
+      progress_buf_b=rollout["progress_buf_b"],
+      cur_iter_num=cur_iter_num,
+    )
+
+  def _log_iteration(
+    self,
+    it: int,
+    loss_dict: dict[str, float],
+    collect_t: float,
+    learn_t: float,
+  ) -> None:
+    """VQ-flavored print: commit / mp / perplexity instead of KL."""
+    rew_a = statistics.fmean(self._rew_buf_a) if self._rew_buf_a else 0.0
+    rew_b = statistics.fmean(self._rew_buf_b) if self._rew_buf_b else 0.0
+    len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
+    len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
+    print(
+      f"[it {it}] "
+      f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
+      f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
+      f"commit_a={loss_dict.get('loss/commit_a', 0):.4f} "
+      f"commit_b={loss_dict.get('loss/commit_b', 0):.4f} "
+      f"mp={loss_dict.get('loss/mp', 0):.4f} "
+      f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
+      f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
+      f"perp_a={loss_dict.get('perplexity_a', 0):.1f} "
+      f"perp_b={loss_dict.get('perplexity_b', 0):.1f} "
+      f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
+      f"len_a={len_a:.0f} len_b={len_b:.0f} "
+      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+    )
+    if self._writer is not None:
+      for k, v in loss_dict.items():
+        self._writer.add_scalar(k, v, it)
+      self._writer.add_scalar("episode/reward_a", rew_a, it)
+      self._writer.add_scalar("episode/reward_b", rew_b, it)
+      self._writer.add_scalar("episode/length_a", len_a, it)
+      self._writer.add_scalar("episode/length_b", len_b, it)
+      self._writer.add_scalar("time/collect", collect_t, it)
+      self._writer.add_scalar("time/learn", learn_t, it)
 
   def save(self, path: str, infos: dict | None = None) -> None:
     """Persist trainable VAE-VQ submodules + quantizer buffers + iter.
