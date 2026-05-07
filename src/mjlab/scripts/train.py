@@ -30,6 +30,13 @@ class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
   registry_name: str | None = None
+  motion_file: str | None = None
+  """Single-motion shortcut for ``--env.commands.motion.motion-file``."""
+  motion_path: str | None = None
+  """Multi-motion shortcut for ``--env.commands.motion.motion-path``
+  (recursive ``*.npz`` glob over a directory)."""
+  motion_type: Literal["isaaclab", "mujoco"] | None = None
+  """Joint/body order of the motion data; multi-motion tasks only."""
   video: bool = False
   video_length: int = 200
   video_interval: int = 2000
@@ -83,6 +90,16 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     motion_cmd = cfg.env.commands["motion"]
 
     if isinstance(motion_cmd, _MultiMotionCommandCfg):
+      # Top-level shortcuts override the cfg defaults. Long-form
+      # ``--env.commands.motion.motion-path`` still works via tyro's
+      # auto-generated nested flags; the short ``--motion-path`` /
+      # ``--motion-type`` here just save typing.
+      if cfg.motion_path is not None:
+        motion_cmd.motion_path = cfg.motion_path
+        motion_cmd.motion_files = []  # let MultiMotionCommand glob the dir
+      if cfg.motion_type is not None:
+        motion_cmd.motion_type = cfg.motion_type
+
       # Multi-motion: trust CLI-injected ``motion_path`` (or explicit
       # ``motion_files``) and skip the W&B artifact path entirely; the
       # motion_path → file-list expansion lives in
@@ -90,7 +107,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
       if not motion_cmd.motion_path and not motion_cmd.motion_files:
         raise ValueError(
           "Multi-motion tracking task requires either:\n"
-          "  --env.commands.motion.motion-path /path/to/motion_dir (recursive *.npz glob)\n"
+          "  --motion-path /path/to/motion_dir   (recursive *.npz glob)\n"
           "  or an explicit list via --env.commands.motion.motion-files"
         )
       if motion_cmd.motion_path:
@@ -99,7 +116,12 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         print(f"[INFO] Using {len(motion_cmd.motion_files)} explicit motion files")
     else:
       assert isinstance(motion_cmd, MotionCommandCfg)
-      # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
+      # Top-level ``--motion-file`` shortcut overrides the nested cfg.
+      if cfg.motion_file is not None:
+        motion_cmd.motion_file = cfg.motion_file
+
+      # Check if motion_file is set (via the shortcut above or via the
+      # long-form ``--env.commands.motion.motion-file``).
       if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
         print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
       elif cfg.registry_name:
@@ -116,7 +138,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         raise ValueError(
           "For tracking tasks, provide either:\n"
           "  --registry-name your-org/motions/motion-name (download from WandB)\n"
-          "  --env.commands.motion.motion-file /path/to/motion.npz (local file)"
+          "  --motion-file /path/to/motion.npz (local file)"
         )
 
   # Enable NaN guard if requested.
@@ -191,10 +213,6 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
-
-  import ipdb
-
-  ipdb.set_trace()
 
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True

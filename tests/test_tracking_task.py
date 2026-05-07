@@ -10,8 +10,14 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 
 @pytest.fixture(scope="module")
 def tracking_task_ids() -> list[str]:
-  """Get all tracking task IDs."""
-  return [t for t in list_tasks() if "Tracking" in t]
+  """Get all single-motion tracking task IDs.
+
+  Multi-motion tracking tasks live in :mod:`mjlab.tasks.multi_motion_tracking`
+  and use ``MultiMotionCommandCfg`` rather than the single-motion
+  ``MotionCommandCfg`` checked in this suite — exclude them here so the
+  type assertions stay valid.
+  """
+  return [t for t in list_tasks() if "Tracking" in t and "MultiMotion" not in t]
 
 
 @pytest.fixture(scope="module")

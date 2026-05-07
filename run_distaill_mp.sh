@@ -5,7 +5,7 @@ cd ~/project/mjlab_prior
 source .venv/bin/activate
 
 uv run python -m mjlab.scripts.train Mjlab-MotionPrior-Flat-Unitree-G1 \
-  --env.commands.motion.motion-path /home/lenovo/g1_retargeted_data/npz/Data10k \
+  --motion-path /home/lenovo/g1_retargeted_data/npz/Data10k \
   --env.scene.num-envs 64 \
   --agent.secondary-num-envs 64 \
   --agent.max-iterations 50 \

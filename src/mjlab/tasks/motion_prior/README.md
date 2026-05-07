@@ -68,7 +68,7 @@ takes the **flat** task ID as primary; the rough env is built internally.
 ```bash
 uv run python -m mjlab.scripts.train \
   --task Mjlab-MotionPrior-Flat-Unitree-G1 \
-  --env.commands.motion.motion-file ~/zcy/Teleopit/data/one_motion_for_debug.npz \
+  --motion-file ~/zcy/Teleopit/data/one_motion_for_debug.npz \
   --env.scene.num-envs 64 \
   --agent.secondary-num-envs 64 \
   --agent.max-iterations 50 \
@@ -85,7 +85,7 @@ single RTX 4090. Loss prints every iter; checkpoint + ONNX land under
 ```bash
 uv run python -m mjlab.scripts.train \
   --task Mjlab-MotionPrior-Flat-Unitree-G1 \
-  --env.commands.motion.motion-file /path/to/your_motion.npz \
+  --motion-file /path/to/your_motion.npz \
   --env.scene.num-envs 4096 \
   --agent.secondary-num-envs 4096 \
   --agent.max-iterations 100000
@@ -119,7 +119,7 @@ point at different ckpts:
 ```bash
 uv run python -m mjlab.scripts.train \
   --task Mjlab-MotionPrior-VQ-Flat-Unitree-G1 \
-  --env.commands.motion.motion-file /path/to/your_motion.npz \
+  --motion-file /path/to/your_motion.npz \
   --env.scene.num-envs 4096 \
   --agent.secondary-num-envs 4096 \
   --agent.max-iterations 100000
@@ -147,7 +147,7 @@ or the VQ codebook) and the optimizer state are persisted.
 ```bash
 uv run python -m mjlab.scripts.play \
   --task Mjlab-MotionPrior-Flat-Unitree-G1 \
-  --env.commands.motion.motion-file /path/to/your_motion.npz \
+  --motion-file /path/to/your_motion.npz \
   --agent.load-run "<timestamp>" \
   --agent.load-checkpoint "model_<iter>.pt"
 ```

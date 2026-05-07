@@ -190,6 +190,88 @@ def make_teacher_a_obs_groups(
   return actor, history
 
 
+def make_teacher_tracking_obs_group(
+  command_name: str = "motion",
+  enable_corruption: bool = True,
+) -> ObservationGroupCfg:
+  """Build the actor observation group of the multi-motion tracking task.
+
+  This produces the **exact same 14-term schema** as
+  :func:`mjlab.tasks.multi_motion_tracking.multi_motion_tracking_env_cfg.make_multi_motion_tracking_env_cfg`
+  uses for its ``actor`` group. The single-encoder motion-prior task
+  loads a teacher trained on this schema, so any divergence between the
+  two definitions silently breaks teacher inference.
+
+  Term ordering matches that env_cfg literally; if you change one, change
+  the other in lockstep.
+  """
+  from mjlab.tasks.multi_motion_tracking import mdp as mt_mdp
+
+  terms: dict[str, ObservationTermCfg] = {
+    "command": ObservationTermCfg(
+      func=mt_mdp.generated_commands, params={"command_name": command_name}
+    ),
+    "projected_gravity": ObservationTermCfg(
+      func=mt_mdp.projected_gravity,
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+      history_length=4,
+    ),
+    "motion_ref_ang_vel": ObservationTermCfg(
+      func=mt_mdp.motion_anchor_ang_vel,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+    "base_ang_vel": ObservationTermCfg(
+      func=mt_mdp.builtin_sensor,
+      params={"sensor_name": "robot/imu_ang_vel"},
+      noise=Unoise(n_min=-0.2, n_max=0.2),
+      history_length=4,
+    ),
+    "joint_pos": ObservationTermCfg(
+      func=mt_mdp.joint_pos_rel,
+      noise=Unoise(n_min=-0.01, n_max=0.01),
+      history_length=4,
+    ),
+    "joint_vel": ObservationTermCfg(
+      func=mt_mdp.joint_vel_rel,
+      noise=Unoise(n_min=-1.0, n_max=1.0),
+      history_length=4,
+    ),
+    "actions": ObservationTermCfg(func=mt_mdp.last_action, history_length=4),
+    "base_lin_vel": ObservationTermCfg(
+      func=mt_mdp.builtin_sensor, params={"sensor_name": "robot/imu_lin_vel"}
+    ),
+    "anchor_pos_diff": ObservationTermCfg(
+      func=mt_mdp.anchor_pos_error, params={"command_name": command_name}
+    ),
+    "key_body_pos_diff": ObservationTermCfg(
+      func=mt_mdp.relative_body_pos_error, params={"command_name": command_name}
+    ),
+    "key_body_rot_diff": ObservationTermCfg(
+      func=mt_mdp.relative_body_orientation_error,
+      params={"command_name": command_name},
+    ),
+    "anchor_height": ObservationTermCfg(
+      func=mt_mdp.anchor_height, params={"command_name": command_name}
+    ),
+    "motion_anchor_pos_b": ObservationTermCfg(
+      func=mt_mdp.motion_anchor_pos_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.25, n_max=0.25),
+    ),
+    "motion_anchor_ori_b": ObservationTermCfg(
+      func=mt_mdp.motion_anchor_ori_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+  }
+  return ObservationGroupCfg(
+    terms=terms,
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
+  )
+
+
 def make_teacher_b_obs_group(
   twist_command_name: str = "twist",
   height_scan_sensor_name: str = "terrain_scan",

@@ -19,6 +19,11 @@ from mjlab.tasks.motion_prior.teacher.loader import (
   make_dummy_obs,
 )
 from mjlab.tasks.motion_prior.teacher.temporal_cnn_model import TemporalCNNModel
+from mjlab.tasks.motion_prior.teacher.tracking_loader import (
+  TrackingTeacherCfg,
+  build_tracking_teacher,
+  load_tracking_teacher,
+)
 from mjlab.tasks.motion_prior.teacher.velocity_loader import (
   VELOCITY_TEACHER_CFG,
   VelocityTeacherCfg,
@@ -40,4 +45,7 @@ __all__ = [
   "VelocityTeacherCfg",
   "build_velocity_teacher",
   "load_velocity_teacher",
+  "TrackingTeacherCfg",
+  "build_tracking_teacher",
+  "load_tracking_teacher",
 ]

@@ -24,6 +24,10 @@ from mjlab.tasks.motion_prior.observations_cfg import (
   make_student_obs_group,
   make_teacher_a_obs_groups,
   make_teacher_b_obs_group,
+  make_teacher_tracking_obs_group,
+)
+from mjlab.tasks.multi_motion_tracking.config.g1.env_cfgs import (
+  unitree_g1_flat_multi_motion_tracking_env_cfg,
 )
 from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
 from mjlab.tasks.tracking.mdp.commands import (
@@ -63,8 +67,9 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
   ``MultiMotionCommandCfg`` so distillation can iterate over a directory
   of motion clips. The tracking task itself stays unchanged — we only
   swap the cfg for *this* env via in-place mutation. CLI override of
-  ``--env.commands.motion.motion-path`` lands before the command's
-  ``__init__`` runs, so the directory glob happens at the right moment.
+  ``--motion-path`` (or long-form ``--env.commands.motion.motion-path``)
+  lands before the command's ``__init__`` runs, so the directory glob
+  happens at the right moment.
   """
   cfg = unitree_g1_flat_tracking_env_cfg(has_state_estimation=True, play=play)
 
@@ -92,7 +97,7 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
     velocity_range=old.velocity_range,
     joint_position_range=old.joint_position_range,
     motion_files=[],
-    motion_path="",  # CLI injects via --env.commands.motion.motion-path
+    motion_path="",  # CLI injects via --motion-path
     motion_type="isaaclab",
     enable_adaptive_sampling=False,
     start_from_zero_step=False,
@@ -149,3 +154,66 @@ def unitree_g1_rough_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlE
 def unitree_g1_flat_motion_prior_vq_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """VQ variant — same env as VAE flat; algorithm differs at runner level."""
   return unitree_g1_flat_motion_prior_env_cfg(play=play)
+
+
+# --------------------------------------------------------------------------- #
+# Single-encoder (one teacher = mjlab MultiMotionTracking actor) variants     #
+# --------------------------------------------------------------------------- #
+
+
+def unitree_g1_flat_motion_prior_single_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Flat motion-prior env for single-encoder distillation.
+
+  Builds on the multi-motion tracking env (so the multi-clip command +
+  scene + events / terminations are inherited as-is), then:
+
+  * Injects a ``terrain_scan`` raycast so the ``student`` group can host
+    a ``height_scan`` extra term, mirroring the dual-encoder layout.
+  * Replaces observations with ``student`` (proprio + height_scan) and
+    ``teacher_tracking`` (the multi-motion tracking actor's 14-term
+    schema — ``make_teacher_tracking_obs_group`` keeps that in sync).
+  * Trims rewards to ``motion_global_anchor_pos`` so episode logs have a
+    meaningful tracking signal (loss is computed from teacher actions,
+    not env reward).
+
+  CLI override of ``--motion-path`` lands in
+  :class:`MultiMotionCommand.__init__` before the directory glob, same as
+  the dual-encoder variant.
+  """
+  cfg = unitree_g1_flat_multi_motion_tracking_env_cfg(play=play)
+
+  # Same terrain_scan injection rule as the dual-encoder flat env so
+  # student's height_scan slice computes correctly on flat terrain.
+  existing = tuple(cfg.scene.sensors or ())
+  if not any(s.name == "terrain_scan" for s in existing):
+    cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
+
+  enable_corruption = not play
+  cfg.observations = {
+    "student": make_student_obs_group(
+      enable_corruption=enable_corruption,
+      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+    ),
+    "teacher_tracking": make_teacher_tracking_obs_group(
+      command_name="motion",
+      enable_corruption=enable_corruption,
+    ),
+  }
+
+  cfg.rewards = {
+    "motion_global_anchor_pos": RewardTermCfg(
+      func=mdp.motion_global_anchor_position_error_exp,
+      weight=0.5,
+      params={"command_name": "motion", "std": 0.3},
+    ),
+  }
+  return cfg
+
+
+def unitree_g1_flat_motion_prior_single_vq_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """VQ variant — same env as the single-encoder VAE flat."""
+  return unitree_g1_flat_motion_prior_single_env_cfg(play=play)

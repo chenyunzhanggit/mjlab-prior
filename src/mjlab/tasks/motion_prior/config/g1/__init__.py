@@ -6,6 +6,8 @@ from mjlab.tasks.motion_prior.rl import (
   DownStreamOnPolicyRunner,
   DownStreamVQOnPolicyRunner,
   MotionPriorOnPolicyRunner,
+  MotionPriorSingleOnPolicyRunner,
+  MotionPriorSingleVQOnPolicyRunner,
   MotionPriorVQOnPolicyRunner,
 )
 from mjlab.tasks.registry import register_mjlab_task
@@ -13,11 +15,15 @@ from mjlab.tasks.registry import register_mjlab_task
 from .downstream_env_cfgs import unitree_g1_downstream_velocity_env_cfg
 from .env_cfgs import (
   unitree_g1_flat_motion_prior_env_cfg,
+  unitree_g1_flat_motion_prior_single_env_cfg,
+  unitree_g1_flat_motion_prior_single_vq_env_cfg,
   unitree_g1_flat_motion_prior_vq_env_cfg,
   unitree_g1_rough_motion_prior_env_cfg,
 )
 from .rl_cfg import (
   unitree_g1_motion_prior_runner_cfg,
+  unitree_g1_motion_prior_single_runner_cfg,
+  unitree_g1_motion_prior_single_vq_runner_cfg,
   unitree_g1_motion_prior_vq_runner_cfg,
 )
 
@@ -89,4 +95,24 @@ register_mjlab_task(
     max_iterations=100_000,
   ),
   runner_cls=DownStreamVQOnPolicyRunner,
+)
+
+# Single-encoder distillation. Teacher = mjlab MultiMotionTracking actor
+# checkpoint; one env (flat with multi-motion command); rough secondary
+# env is NOT spun up. teacher_policy_path is required at CLI.
+register_mjlab_task(
+  task_id="Mjlab-MotionPriorSingle-Flat-Unitree-G1",
+  env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(),
+  play_env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(play=True),
+  rl_cfg=unitree_g1_motion_prior_single_runner_cfg(),
+  runner_cls=MotionPriorSingleOnPolicyRunner,
+)
+
+# VQ flavor of single-encoder distillation; same env, codebook latent.
+register_mjlab_task(
+  task_id="Mjlab-MotionPriorSingle-VQ-Flat-Unitree-G1",
+  env_cfg=unitree_g1_flat_motion_prior_single_vq_env_cfg(),
+  play_env_cfg=unitree_g1_flat_motion_prior_single_vq_env_cfg(play=True),
+  rl_cfg=unitree_g1_motion_prior_single_vq_runner_cfg(),
+  runner_cls=MotionPriorSingleVQOnPolicyRunner,
 )
