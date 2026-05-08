@@ -463,38 +463,31 @@ class MotionPriorOnPolicyRunner:
     collect_t: float,
     learn_t: float,
   ) -> None:
-    """Mirror motionprior reference's log() — terminal pretty-print +
-    writer scalars under ``Episode/`` / ``Loss/`` / ``Train/`` / ``Perf/``.
+    """Console + writer log. Format mirrors ``rsl_rl.utils.logger.Logger.log``
+    (the same code path the mjlab tracking task runs through), so output
+    is bit-aligned with the reference: width=80, pad=40, banner with
+    ``\\033[1m...\\033[0m``, ``Episode/``, ``Loss/``, ``Perf/``,
+    ``Train/`` writer prefixes.
 
-    Per-iteration env metrics (termination rates, per-reward components,
-    command-term errors) live in the captured ``_ep_infos_*`` lists which
-    we average and flush here. ``ep_infos`` keys with ``/`` already in
-    them (e.g. ``Episode_Termination/anchor_pos`` from
-    ``termination_manager.reset``) are passed through as-is; bare keys
-    get an ``Episode_a/`` or ``Episode_b/`` prefix so the two envs don't
-    collide on the writer.
+    Differences vs single-env tracking:
+
+    * Two envs are rolled out in parallel, so per-iteration
+      ``rewbuffer`` / ``lenbuffer`` / ``ep_extras`` are tracked twice
+      (suffix ``_a`` / ``_b``). The two are printed as adjacent rows
+      under the same iteration banner; on the writer they appear as
+      ``Train/mean_reward_a`` / ``_b``, ``Episode_a/<k>`` / ``Episode_b/<k>``,
+      etc.
+    * No PPO action-std to log; per-env ``Loss/*`` keys carry the VAE
+      (or VQ) loss components instead.
     """
-    self._log_iteration_combined(it, loss_dict, collect_t, learn_t)
+    width = 80
+    pad = 40
 
-  def _log_iteration_combined(
-    self,
-    it: int,
-    loss_dict: dict[str, float],
-    collect_t: float,
-    learn_t: float,
-    behavior_keys: tuple[str, ...] = ("loss/behavior_a", "loss/behavior_b"),
-    kl_keys: tuple[str, ...] = ("loss/kl_a", "loss/kl_b"),
-    ar1_keys: tuple[str, ...] = ("loss/ar1_a", "loss/ar1_b"),
-    extra_keys: tuple[str, ...] = (),
-  ) -> None:
-    """Shared logging body, parameterized over which loss keys to print.
-
-    VQ subclass overrides ``_log_iteration`` to swap KL for commit / mp /
-    perplexity in the terminal preview while still flushing every
-    ``loss_dict`` key to the writer.
-    """
     iteration_time = collect_t + learn_t
-    collection_size = self.num_steps_per_env * (self.env.num_envs + self.env_b.num_envs)
+    collection_size = (
+      self.num_steps_per_env
+      * (self.env.num_envs + self.env_b.num_envs)
+    )
     self._tot_timesteps += collection_size
     self._tot_time += iteration_time
     fps = int(collection_size / max(iteration_time, 1e-9))
@@ -504,94 +497,98 @@ class MotionPriorOnPolicyRunner:
     len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
     len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
 
-    # ---- Aggregate ep_infos (per-env) ---------------------------------
-    ep_a = _average_ep_infos(self._ep_infos_a)
-    ep_b = _average_ep_infos(self._ep_infos_b)
-    self._ep_infos_a.clear()
-    self._ep_infos_b.clear()
-
-    # ---- Terminal print ----------------------------------------------
-    header = (
-      f"\n{'=' * 72}\n"
-      f" Learning iteration {it}/{self._start_iter + self._num_learning_iterations}\n"
-      f"{'-' * 72}\n"
-    )
-    losses_str = " ".join(
-      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
-      for k in (*behavior_keys, *kl_keys, *ar1_keys, *extra_keys)
-      if k in loss_dict
-    )
-    eta = self._format_eta(it)
-    print(
-      f"{header}"
-      f" Computation:    {fps} steps/s (collect {collect_t:.2f}s, learn {learn_t:.2f}s)\n"
-      f" Losses:         {losses_str}\n"
-      f" Train (flat):   rew={rew_a:.2f}  len={len_a:.1f}\n"
-      f" Train (rough):  rew={rew_b:.2f}  len={len_b:.1f}\n"
-      f" Total steps:    {self._tot_timesteps}  Elapsed: "
-      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}  ETA: {eta}\n"
-      f"{'=' * 72}",
-      flush=True,
-    )
-
-    # ---- Print top termination rates if present -----------------------
-    self._print_top_terminations(ep_a, ep_b)
-
-    # ---- Writer flush -------------------------------------------------
+    # ---- Writer scalars (same prefixes as rsl_rl Logger) --------------
     if self._writer is not None:
       # Losses
       for k, v in loss_dict.items():
-        self._writer.add_scalar(f"Loss/{k.split('/')[-1]}", v, it)
-      # Train aggregates
-      self._writer.add_scalar("Train/mean_reward_a", rew_a, it)
-      self._writer.add_scalar("Train/mean_reward_b", rew_b, it)
-      self._writer.add_scalar("Train/mean_episode_length_a", len_a, it)
-      self._writer.add_scalar("Train/mean_episode_length_b", len_b, it)
+        # ``loss_dict`` keys come in as ``loss/<name>`` from our algos;
+        # rsl_rl Logger puts them under ``Loss/<name>``.
+        name = k.split("/", 1)[1] if k.startswith("loss/") else k
+        self._writer.add_scalar(f"Loss/{name}", v, it)
       # Perf
       self._writer.add_scalar("Perf/total_fps", fps, it)
       self._writer.add_scalar("Perf/collection_time", collect_t, it)
       self._writer.add_scalar("Perf/learning_time", learn_t, it)
-      # Per-env episode metrics
-      for k, v in ep_a.items():
-        if "/" in k:  # already namespaced (e.g. Episode_Termination/...)
-          self._writer.add_scalar(f"{k}/a", v, it)
-        else:
-          self._writer.add_scalar(f"Episode_a/{k}", v, it)
-      for k, v in ep_b.items():
-        if "/" in k:
-          self._writer.add_scalar(f"{k}/b", v, it)
-        else:
-          self._writer.add_scalar(f"Episode_b/{k}", v, it)
+      # Train aggregates (per-env)
+      self._writer.add_scalar("Train/mean_reward_a", rew_a, it)
+      self._writer.add_scalar("Train/mean_reward_b", rew_b, it)
+      self._writer.add_scalar("Train/mean_episode_length_a", len_a, it)
+      self._writer.add_scalar("Train/mean_episode_length_b", len_b, it)
 
-  def _print_top_terminations(
-    self, ep_a: dict[str, float], ep_b: dict[str, float]
-  ) -> None:
-    """Surface termination rates so the user can see *which* termination
-    is firing — critical for debugging short episode_len."""
+    # ---- Episode extras (per-env), aggregated to writer + extras_string
+    extras_str_a = self._flush_ep_extras(self._ep_infos_a, it, suffix="a", pad=pad)
+    extras_str_b = self._flush_ep_extras(self._ep_infos_b, it, suffix="b", pad=pad)
+    self._ep_infos_a.clear()
+    self._ep_infos_b.clear()
 
-    def _filter(ep: dict[str, float]) -> list[tuple[str, float]]:
-      items = [
-        (k.split("/")[-1], v)
-        for k, v in ep.items()
-        if k.startswith("Episode_Termination/") and v > 0
-      ]
-      return sorted(items, key=lambda kv: -kv[1])
+    # ---- Console (matches rsl_rl Logger.log layout exactly) -----------
+    log_string = "#" * width + "\n"
+    log_string += (
+      f"\033[1m{f' Learning iteration {it}/{self._start_iter + self._num_learning_iterations} '.center(width)}\033[0m \n\n"
+    )
+    log_string += (
+      f"{'Total steps:':>{pad}} {self._tot_timesteps} \n"
+      f"{'Steps per second:':>{pad}} {fps:.0f} \n"
+      f"{'Collection time:':>{pad}} {collect_t:.3f}s \n"
+      f"{'Learning time:':>{pad}} {learn_t:.3f}s \n"
+    )
+    for k, v in loss_dict.items():
+      name = k.split("/", 1)[1] if k.startswith("loss/") else k
+      log_string += f"{f'Mean {name} loss:':>{pad}} {v:.4f}\n"
+    if self._rew_buf_a or self._rew_buf_b:
+      log_string += f"{'Mean reward (flat):':>{pad}} {rew_a:.2f}\n"
+      log_string += f"{'Mean reward (rough):':>{pad}} {rew_b:.2f}\n"
+      log_string += f"{'Mean episode length (flat):':>{pad}} {len_a:.2f}\n"
+      log_string += f"{'Mean episode length (rough):':>{pad}} {len_b:.2f}\n"
+    log_string += extras_str_a
+    log_string += extras_str_b
 
-    top_a = _filter(ep_a)
-    top_b = _filter(ep_b)
-    if top_a or top_b:
-      msg_a = ", ".join(f"{n}={v:.0f}" for n, v in top_a) or "—"
-      msg_b = ", ".join(f"{n}={v:.0f}" for n, v in top_b) or "—"
-      print(f" Term (flat):    {msg_a}")
-      print(f" Term (rough):   {msg_b}")
+    done_it = it + 1 - self._start_iter
+    remaining_it = self._num_learning_iterations - done_it
+    if done_it > 0 and remaining_it > 0:
+      eta_secs = self._tot_time / done_it * remaining_it
+      eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_secs))
+    else:
+      eta_str = "--:--:--"
+    log_string += "-" * width + "\n"
+    log_string += f"{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"
+    log_string += (
+      f"{'Time elapsed:':>{pad}} "
+      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}\n"
+    )
+    log_string += f"{'ETA:':>{pad}} {eta_str}\n"
+    print(log_string, flush=True)
 
-  def _format_eta(self, it: int) -> str:
-    iters_done = max(it - self._start_iter + 1, 1)
-    iters_left = self._start_iter + self._num_learning_iterations - it - 1
-    if iters_done <= 0 or iters_left <= 0:
-      return "--:--:--"
-    eta_secs = self._tot_time / iters_done * iters_left
-    return time.strftime("%H:%M:%S", time.gmtime(eta_secs))
+  def _flush_ep_extras(
+    self,
+    ep_extras: list[dict[str, Any]],
+    it: int,
+    suffix: str,
+    pad: int,
+  ) -> str:
+    """Average ``extras["log"]`` snapshots, write to ``self._writer``,
+    and return a console snippet aligned to ``Logger.log`` formatting.
+
+    Keys with ``/`` are written as-is plus a per-env suffix
+    (``Episode_Termination/anchor_pos/a``); bare keys go under
+    ``Episode_<suffix>/<key>``. Console snippet uses
+    ``"<key>:" >> pad`` for the right-aligned label, matching upstream.
+    """
+    averaged = _average_ep_infos(ep_extras)
+    if not averaged:
+      return ""
+
+    extras_string = ""
+    for k, v in averaged.items():
+      if "/" in k:
+        if self._writer is not None:
+          self._writer.add_scalar(f"{k}/{suffix}", v, it)
+        extras_string += f"{f'{k}/{suffix}:':>{pad}} {v:.4f}\n"
+      else:
+        if self._writer is not None:
+          self._writer.add_scalar(f"Episode_{suffix}/{k}", v, it)
+        extras_string += f"{f'Mean episode {k} ({suffix}):':>{pad}} {v:.4f}\n"
+    return extras_string
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #
@@ -881,24 +878,10 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
       cur_iter_num=cur_iter_num,
     )
 
-  def _log_iteration(
-    self,
-    it: int,
-    loss_dict: dict[str, float],
-    collect_t: float,
-    learn_t: float,
-  ) -> None:
-    """VQ-flavored print: commit / mp / perplexity instead of KL."""
-    self._log_iteration_combined(
-      it,
-      loss_dict,
-      collect_t,
-      learn_t,
-      behavior_keys=("loss/behavior_a", "loss/behavior_b"),
-      kl_keys=("loss/commit_a", "loss/commit_b", "loss/mp"),
-      ar1_keys=("loss/ar1_a", "loss/ar1_b"),
-      extra_keys=("perplexity_a", "perplexity_b"),
-    )
+  # VQ shares the same console / writer log layout as the dual VAE; the
+  # only differences are the loss-dict keys (``loss/commit_*``,
+  # ``loss/mp``, ``perplexity_*``), which are surfaced uniformly via the
+  # shared ``_log_iteration`` body. No override needed.
 
   def save(self, path: str, infos: dict | None = None) -> None:
     """Persist trainable VAE-VQ submodules + quantizer buffers + iter.

@@ -317,31 +317,15 @@ class MotionPriorSingleOnPolicyRunner:
     collect_t: float,
     learn_t: float,
   ) -> None:
-    self._log_iteration_combined(
-      it,
-      loss_dict,
-      collect_t,
-      learn_t,
-      print_keys=("loss/behavior", "loss/kl", "loss/ar1"),
-    )
-
-  def _log_iteration_combined(
-    self,
-    it: int,
-    loss_dict: dict[str, float],
-    collect_t: float,
-    learn_t: float,
-    print_keys: tuple[str, ...] = (),
-  ) -> None:
-    """Single-env logging body parameterized over which loss keys to
-    surface in the terminal preview. VQ subclass overrides ``print_keys``
-    to swap KL → commit / mp / perplexity.
-
-    Per-iteration env metrics live in ``_ep_infos`` (captured from each
-    ``env.step``'s ``extras["log"]``); we average and flush them here.
-    Keys with ``/`` already in them (e.g. ``Episode_Termination/...``)
-    pass through; bare keys get an ``Episode/`` prefix.
+    """Console + writer log. Format mirrors ``rsl_rl.utils.logger.Logger.log``
+    (the same code path the mjlab tracking task runs through), so output
+    is bit-aligned with the reference: width=80, pad=40, banner with
+    ``\\033[1m...\\033[0m``, ``Episode/``, ``Loss/``, ``Perf/``,
+    ``Train/`` writer prefixes.
     """
+    width = 80
+    pad = 40
+
     iteration_time = collect_t + learn_t
     collection_size = self.num_steps_per_env * self.env.num_envs
     self._tot_timesteps += collection_size
@@ -351,69 +335,65 @@ class MotionPriorSingleOnPolicyRunner:
     rew = statistics.fmean(self._rew_buf) if self._rew_buf else 0.0
     length = statistics.fmean(self._len_buf) if self._len_buf else 0.0
 
-    ep = _average_ep_infos(self._ep_infos)
-    self._ep_infos.clear()
-
-    losses_str = " ".join(
-      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
-      for k in print_keys
-      if k in loss_dict
-    )
-    extra_loss_str = " ".join(
-      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
-      for k in loss_dict
-      if k not in print_keys and not k.startswith("schedule")
-    )
-    eta = self._format_eta(it)
-    header = (
-      f"\n{'=' * 72}\n"
-      f" Learning iteration {it}/{self._start_iter + self._num_learning_iterations}\n"
-      f"{'-' * 72}\n"
-    )
-    print(
-      f"{header}"
-      f" Computation:    {fps} steps/s (collect {collect_t:.2f}s, learn {learn_t:.2f}s)\n"
-      f" Losses:         {losses_str}{('  ' + extra_loss_str) if extra_loss_str else ''}\n"
-      f" Train:          rew={rew:.2f}  len={length:.1f}\n"
-      f" Total steps:    {self._tot_timesteps}  Elapsed: "
-      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}  ETA: {eta}\n"
-      f"{'=' * 72}",
-      flush=True,
-    )
-
-    # Show termination breakdown for debugging short episodes.
-    term_items = sorted(
-      (
-        (k.split("/")[-1], v)
-        for k, v in ep.items()
-        if k.startswith("Episode_Termination/") and v > 0
-      ),
-      key=lambda kv: -kv[1],
-    )
-    if term_items:
-      print(" Term:           " + ", ".join(f"{n}={v:.0f}" for n, v in term_items))
-
+    # ---- Writer scalars ----------------------------------------------
     if self._writer is not None:
       for k, v in loss_dict.items():
-        self._writer.add_scalar(f"Loss/{k.split('/')[-1]}", v, it)
-      self._writer.add_scalar("Train/mean_reward", rew, it)
-      self._writer.add_scalar("Train/mean_episode_length", length, it)
+        name = k.split("/", 1)[1] if k.startswith("loss/") else k
+        self._writer.add_scalar(f"Loss/{name}", v, it)
       self._writer.add_scalar("Perf/total_fps", fps, it)
       self._writer.add_scalar("Perf/collection_time", collect_t, it)
       self._writer.add_scalar("Perf/learning_time", learn_t, it)
-      for k, v in ep.items():
-        if "/" in k:
-          self._writer.add_scalar(k, v, it)
-        else:
-          self._writer.add_scalar(f"Episode/{k}", v, it)
+      self._writer.add_scalar("Train/mean_reward", rew, it)
+      self._writer.add_scalar("Train/mean_episode_length", length, it)
 
-  def _format_eta(self, it: int) -> str:
-    iters_done = max(it - self._start_iter + 1, 1)
-    iters_left = self._start_iter + self._num_learning_iterations - it - 1
-    if iters_done <= 0 or iters_left <= 0:
-      return "--:--:--"
-    eta_secs = self._tot_time / iters_done * iters_left
-    return time.strftime("%H:%M:%S", time.gmtime(eta_secs))
+    # ---- Episode extras flush ----------------------------------------
+    averaged = _average_ep_infos(self._ep_infos)
+    self._ep_infos.clear()
+    extras_string = ""
+    for k, v in averaged.items():
+      if "/" in k:
+        if self._writer is not None:
+          self._writer.add_scalar(k, v, it)
+        extras_string += f"{f'{k}:':>{pad}} {v:.4f}\n"
+      else:
+        if self._writer is not None:
+          self._writer.add_scalar(f"Episode/{k}", v, it)
+        extras_string += f"{f'Mean episode {k}:':>{pad}} {v:.4f}\n"
+
+    # ---- Console (matches rsl_rl Logger.log layout exactly) ----------
+    log_string = "#" * width + "\n"
+    log_string += (
+      f"\033[1m{f' Learning iteration {it}/{self._start_iter + self._num_learning_iterations} '.center(width)}\033[0m \n\n"
+    )
+    log_string += (
+      f"{'Total steps:':>{pad}} {self._tot_timesteps} \n"
+      f"{'Steps per second:':>{pad}} {fps:.0f} \n"
+      f"{'Collection time:':>{pad}} {collect_t:.3f}s \n"
+      f"{'Learning time:':>{pad}} {learn_t:.3f}s \n"
+    )
+    for k, v in loss_dict.items():
+      name = k.split("/", 1)[1] if k.startswith("loss/") else k
+      log_string += f"{f'Mean {name} loss:':>{pad}} {v:.4f}\n"
+    if self._rew_buf:
+      log_string += f"{'Mean reward:':>{pad}} {rew:.2f}\n"
+      log_string += f"{'Mean episode length:':>{pad}} {length:.2f}\n"
+    log_string += extras_string
+
+    done_it = it + 1 - self._start_iter
+    remaining_it = self._num_learning_iterations - done_it
+    if done_it > 0 and remaining_it > 0:
+      eta_secs = self._tot_time / done_it * remaining_it
+      eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_secs))
+    else:
+      eta_str = "--:--:--"
+    log_string += "-" * width + "\n"
+    log_string += f"{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"
+    log_string += (
+      f"{'Time elapsed:':>{pad}} "
+      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}\n"
+    )
+    log_string += f"{'ETA:':>{pad}} {eta_str}\n"
+    print(log_string, flush=True)
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #

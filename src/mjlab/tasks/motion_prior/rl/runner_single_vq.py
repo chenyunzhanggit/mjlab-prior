@@ -143,27 +143,10 @@ class MotionPriorSingleVQOnPolicyRunner(MotionPriorSingleOnPolicyRunner):
   # Logging                                                               #
   # --------------------------------------------------------------------- #
 
-  def _log_iteration(
-    self,
-    it: int,
-    loss_dict: dict[str, float],
-    collect_t: float,
-    learn_t: float,
-  ) -> None:
-    """VQ-flavored print: commit / mp / perplexity instead of KL."""
-    self._log_iteration_combined(
-      it,
-      loss_dict,
-      collect_t,
-      learn_t,
-      print_keys=(
-        "loss/behavior",
-        "loss/commit",
-        "loss/mp",
-        "loss/ar1",
-        "perplexity",
-      ),
-    )
+  # VQ shares the same console / writer log layout as the single VAE;
+  # the differences are the loss-dict keys (``loss/commit``, ``loss/mp``,
+  # ``perplexity``), which are surfaced uniformly via the shared
+  # ``_log_iteration`` body inherited from ``MotionPriorSingleOnPolicyRunner``.
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #
