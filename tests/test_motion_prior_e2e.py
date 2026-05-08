@@ -57,7 +57,9 @@ def test_dual_env_distillation_smoke(tmp_path: Path) -> None:
     RslRlMotionPriorRunnerCfg,
   )
   from mjlab.tasks.registry import load_env_cfg
-  from mjlab.tasks.tracking.mdp import MotionCommandCfg
+  from mjlab.tasks.tracking.mdp.multi_commands import (
+    MotionCommandCfg as MultiMotionCommandCfg,
+  )
 
   device = "cuda:0"
   num_envs = 32
@@ -66,7 +68,10 @@ def test_dual_env_distillation_smoke(tmp_path: Path) -> None:
   flat_cfg = load_env_cfg("Mjlab-MotionPrior-Flat-Unitree-G1")
   flat_cfg.scene.num_envs = num_envs
   motion_cmd = flat_cfg.commands["motion"]
-  assert isinstance(motion_cmd, MotionCommandCfg)
+  # Motion-prior flat env now uses the multi-motion command. Tests still
+  # drive a single .npz via the ``motion_file`` field (single-clip code
+  # path inside ``MultiMotionCommand._resolve_motion_files``).
+  assert isinstance(motion_cmd, MultiMotionCommandCfg)
   motion_cmd.motion_file = str(MOTION_FILE)
   flat_env = RslRlVecEnvWrapper(ManagerBasedRlEnv(cfg=flat_cfg, device=device))
 

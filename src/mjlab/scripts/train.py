@@ -83,20 +83,26 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     motion_cmd = cfg.env.commands["motion"]
 
     if isinstance(motion_cmd, _MultiMotionCommandCfg):
-      # Multi-motion: trust CLI-injected ``motion_path`` (or explicit
-      # ``motion_files``) and skip the W&B artifact path entirely; the
-      # motion_path → file-list expansion lives in
-      # ``MultiMotionCommand.__init__`` so CLI overrides land first.
-      if not motion_cmd.motion_path and not motion_cmd.motion_files:
+      # Multi-motion: trust CLI-injected ``motion_path`` (directory glob)
+      # or ``motion_file`` (single .npz) and skip the W&B artifact path
+      # entirely; the motion_path/file resolution lives in
+      # ``MultiMotionCommand._resolve_motion_files`` so CLI overrides land
+      # first.
+      if not motion_cmd.motion_path and not motion_cmd.motion_file:
         raise ValueError(
           "Multi-motion tracking task requires either:\n"
           "  --env.commands.motion.motion-path /path/to/motion_dir (recursive *.npz glob)\n"
-          "  or an explicit list via --env.commands.motion.motion-files"
+          "  --env.commands.motion.motion-file /path/to/motion.npz (single clip)"
+        )
+      if motion_cmd.motion_path and motion_cmd.motion_file:
+        raise ValueError(
+          "Specify either --env.commands.motion.motion-path or "
+          "--env.commands.motion.motion-file, not both."
         )
       if motion_cmd.motion_path:
         print(f"[INFO] Using motion directory: {motion_cmd.motion_path}")
       else:
-        print(f"[INFO] Using {len(motion_cmd.motion_files)} explicit motion files")
+        print(f"[INFO] Using single motion file: {motion_cmd.motion_file}")
     else:
       assert isinstance(motion_cmd, MotionCommandCfg)
       # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).

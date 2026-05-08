@@ -80,6 +80,11 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
   # Swap single-motion -> multi-motion. Carry over every field so the
   # tracking-task defaults (resampling_time_range, pose/velocity ranges,
   # body lists, debug_vis, viz mode) survive the swap.
+  #
+  # ``history_steps=0`` and ``future_steps=1`` keep ``anchor_*_w``
+  # at shape ``(N, 3)`` / ``(N, 4)`` per the motion_prior contract
+  # (see ``single_motion_migration_audit.md``); the multi-motion command
+  # otherwise concatenates a [history, current, future] window.
   old = cfg.commands["motion"]
   assert isinstance(old, SingleMotionCommandCfg)
   cfg.commands["motion"] = MultiMotionCommandCfg(
@@ -91,11 +96,12 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
     pose_range=old.pose_range,
     velocity_range=old.velocity_range,
     joint_position_range=old.joint_position_range,
-    motion_files=[],
     motion_path="",  # CLI injects via --env.commands.motion.motion-path
+    motion_file="",  # Or set via --env.commands.motion.motion-file
     motion_type="isaaclab",
-    enable_adaptive_sampling=False,
-    start_from_zero_step=False,
+    history_steps=0,
+    future_steps=1,
+    sampling_mode="uniform",
     if_log_metrics=True,
   )
 

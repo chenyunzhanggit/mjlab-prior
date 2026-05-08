@@ -22,7 +22,7 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.tracking import mdp
-from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp import MotionCommandCfg as DefaultMotionCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
@@ -37,7 +37,9 @@ VELOCITY_RANGE = {
 }
 
 
-def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
+def make_tracking_env_cfg(
+  motion_command_cfg_cls: type[CommandTermCfg] = DefaultMotionCommandCfg,
+) -> ManagerBasedRlEnvCfg:
   """Create base tracking task configuration."""
 
   ##
@@ -78,7 +80,38 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "actions": ObservationTermCfg(func=mdp.last_action),
   }
-
+  teacher_actor_terms ={
+    "command": ObservationTermCfg(
+      func=mdp.generated_commands, params={"command_name": "motion"}
+    ),
+    "motion_anchor_pos_b": ObservationTermCfg(
+      func=mdp.motion_anchor_pos_b, params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.25, n_max=0.25),
+    ),
+    "motion_anchor_ori_b": ObservationTermCfg(
+      func=mdp.motion_anchor_ori_b, params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+    "body_pos": ObservationTermCfg(
+      func=mdp.robot_body_pos_b, params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.25, n_max=0.25),
+    ),
+    "body_ori": ObservationTermCfg(
+      func=mdp.robot_body_ori_b, params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+    "base_lin_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_lin_vel"},
+      noise=Unoise(n_min=-0.5, n_max=0.5),
+    ),
+    "base_ang_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_ang_vel"},
+      noise=Unoise(n_min=-0.2, n_max=0.2),
+    ),
+    "joint_pos": ObservationTermCfg(func=mdp.joint_pos_rel,noise=Unoise(n_min=-0.01, n_max=0.01)),
+    "joint_vel": ObservationTermCfg(func=mdp.joint_vel_rel,noise=Unoise(n_min=-0.5, n_max=0.5)),
+    "actions": ObservationTermCfg(func=mdp.last_action),
+  }
   critic_terms = {
     "command": ObservationTermCfg(
       func=mdp.generated_commands, params={"command_name": "motion"}
@@ -108,7 +141,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
 
   observations = {
     "actor": ObservationGroupCfg(
-      terms=actor_terms,
+      terms=teacher_actor_terms,
       concatenate_terms=True,
       enable_corruption=True,
     ),
@@ -136,26 +169,30 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
   # Commands
   ##
 
+  motion_kwargs = dict(
+    entity_name="robot",
+    resampling_time_range=(1.0e9, 1.0e9),
+    debug_vis=True,
+    pose_range={
+      "x": (-0.05, 0.05),
+      "y": (-0.05, 0.05),
+      "z": (-0.01, 0.01),
+      "roll": (-0.1, 0.1),
+      "pitch": (-0.1, 0.1),
+      "yaw": (-0.2, 0.2),
+    },
+    velocity_range=VELOCITY_RANGE,
+    joint_position_range=(-0.1, 0.1),
+    anchor_body_name="",
+    body_names=(),
+  )
+  if "motion_path" in motion_command_cfg_cls.__dataclass_fields__:
+    motion_kwargs["motion_path"] = ""
+  else:
+    motion_kwargs["motion_file"] = ""
+
   commands: dict[str, CommandTermCfg] = {
-    "motion": MotionCommandCfg(
-      entity_name="robot",
-      resampling_time_range=(1.0e9, 1.0e9),
-      debug_vis=True,
-      pose_range={
-        "x": (-0.05, 0.05),
-        "y": (-0.05, 0.05),
-        "z": (-0.01, 0.01),
-        "roll": (-0.1, 0.1),
-        "pitch": (-0.1, 0.1),
-        "yaw": (-0.2, 0.2),
-      },
-      velocity_range=VELOCITY_RANGE,
-      joint_position_range=(-0.1, 0.1),
-      # Override in robot cfg.
-      motion_file="",
-      anchor_body_name="",
-      body_names=(),
-    )
+    "motion": motion_command_cfg_cls(**motion_kwargs)
   }
 
   ##
@@ -258,7 +295,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     "anchor_pos": TerminationTermCfg(
       func=mdp.bad_anchor_pos_z_only,
-      params={"command_name": "motion", "threshold": 0.25},
+      params={"command_name": "motion", "threshold": 0.5},
     ),
     "anchor_ori": TerminationTermCfg(
       func=mdp.bad_anchor_ori,
@@ -272,7 +309,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.bad_motion_body_pos_z_only,
       params={
         "command_name": "motion",
-        "threshold": 0.25,
+        "threshold": 0.5,
         "body_names": (),  # Set per-robot.
       },
     ),

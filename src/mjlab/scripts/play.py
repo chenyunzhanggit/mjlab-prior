@@ -96,21 +96,26 @@ def run_play(task_id: str, cfg: PlayConfig):
     motion_cmd.sampling_mode = "uniform"
 
   if is_multi_motion_task:
-    # Multi-motion tasks (e.g. motion_prior flat env): only --motion-path /
-    # --motion-type are honored. wandb artifact / single motion_file paths
-    # don't apply since the cfg field is ``motion_path`` (directory glob).
+    # Multi-motion tasks: --motion-path (directory glob) or --motion-file
+    # (single .npz) plus --motion-type are honored. wandb artifact paths
+    # don't apply.
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MultiMotionCommandCfg)
     if cfg.motion_path is not None:
       print(f"[INFO]: Using local motion path: {cfg.motion_path}")
       motion_cmd.motion_path = cfg.motion_path
-      motion_cmd.motion_files = []  # let MultiMotionCommand glob the dir
+      motion_cmd.motion_file = ""  # disambiguate against motion_file branch
+    if cfg.motion_file is not None and Path(cfg.motion_file).exists():
+      print(f"[INFO]: Using local motion file: {cfg.motion_file}")
+      motion_cmd.motion_file = cfg.motion_file
+      motion_cmd.motion_path = ""
     if cfg.motion_type is not None:
       motion_cmd.motion_type = cfg.motion_type
-    if not motion_cmd.motion_path and not motion_cmd.motion_files:
+    if not motion_cmd.motion_path and not motion_cmd.motion_file:
       raise ValueError(
-        "Multi-motion tracking task requires --motion-path /path/to/dir "
-        "(or pre-populated motion_files in the env_cfg)."
+        "Multi-motion tracking task requires either:\n"
+        "  --motion-path /path/to/dir (recursive *.npz glob)\n"
+        "  --motion-file /path/to/motion.npz (single clip)"
       )
   elif is_single_motion_task:
     motion_cmd = env_cfg.commands["motion"]

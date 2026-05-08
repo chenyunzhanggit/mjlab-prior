@@ -32,26 +32,175 @@ if TYPE_CHECKING:
 
 _DESIRED_FRAME_COLORS = ((1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 1.0))
 
+_ISAACLAB_JOINT_NAMES = [
+  "left_hip_pitch_joint",
+  "right_hip_pitch_joint",
+  "waist_yaw_joint",
+  "left_hip_roll_joint",
+  "right_hip_roll_joint",
+  "waist_roll_joint",
+  "left_hip_yaw_joint",
+  "right_hip_yaw_joint",
+  "waist_pitch_joint",
+  "left_knee_joint",
+  "right_knee_joint",
+  "left_shoulder_pitch_joint",
+  "right_shoulder_pitch_joint",
+  "left_ankle_pitch_joint",
+  "right_ankle_pitch_joint",
+  "left_shoulder_roll_joint",
+  "right_shoulder_roll_joint",
+  "left_ankle_roll_joint",
+  "right_ankle_roll_joint",
+  "left_shoulder_yaw_joint",
+  "right_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "right_elbow_joint",
+  "left_wrist_roll_joint",
+  "right_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "right_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_wrist_yaw_joint",
+]
+
+_MUJOCO_JOINT_NAMES = [
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint",
+]
+
+_ISAACLAB_BODY_NAMES = [
+  "pelvis",
+  "left_hip_pitch_link",
+  "right_hip_pitch_link",
+  "waist_yaw_link",
+  "left_hip_roll_link",
+  "right_hip_roll_link",
+  "waist_roll_link",
+  "left_hip_yaw_link",
+  "right_hip_yaw_link",
+  "torso_link",
+  "left_knee_link",
+  "right_knee_link",
+  "left_shoulder_pitch_link",
+  "right_shoulder_pitch_link",
+  "left_ankle_pitch_link",
+  "right_ankle_pitch_link",
+  "left_shoulder_roll_link",
+  "right_shoulder_roll_link",
+  "left_ankle_roll_link",
+  "right_ankle_roll_link",
+  "left_shoulder_yaw_link",
+  "right_shoulder_yaw_link",
+  "left_elbow_link",
+  "right_elbow_link",
+  "left_wrist_roll_link",
+  "right_wrist_roll_link",
+  "left_wrist_pitch_link",
+  "right_wrist_pitch_link",
+  "left_wrist_yaw_link",
+  "right_wrist_yaw_link",
+]
+
+_MUJOCO_BODY_NAMES = [
+  "pelvis",
+  "left_hip_pitch_link",
+  "left_hip_roll_link",
+  "left_hip_yaw_link",
+  "left_knee_link",
+  "left_ankle_pitch_link",
+  "left_ankle_roll_link",
+  "right_hip_pitch_link",
+  "right_hip_roll_link",
+  "right_hip_yaw_link",
+  "right_knee_link",
+  "right_ankle_pitch_link",
+  "right_ankle_roll_link",
+  "waist_yaw_link",
+  "waist_roll_link",
+  "torso_link",
+  "left_shoulder_pitch_link",
+  "left_shoulder_roll_link",
+  "left_shoulder_yaw_link",
+  "left_elbow_link",
+  "left_wrist_roll_link",
+  "left_wrist_pitch_link",
+  "left_wrist_yaw_link",
+  "right_shoulder_pitch_link",
+  "right_shoulder_roll_link",
+  "right_shoulder_yaw_link",
+  "right_elbow_link",
+  "right_wrist_roll_link",
+  "right_wrist_pitch_link",
+  "right_wrist_yaw_link",
+]
+
+_ISAACLAB_TO_MUJOCO_JOINT_REINDEX = [
+  _ISAACLAB_JOINT_NAMES.index(name) for name in _MUJOCO_JOINT_NAMES
+]
+_ISAACLAB_TO_MUJOCO_BODY_REINDEX = [
+  _ISAACLAB_BODY_NAMES.index(name) for name in _MUJOCO_BODY_NAMES
+]
+
 
 class MotionLoader:
   def __init__(
-    self, motion_file: str, body_indexes: torch.Tensor, device: str = "cpu"
+    self,
+    motion_file: str,
+    body_indexes: torch.Tensor,
+    motion_type: Literal["isaaclab", "mujoco"] = "isaaclab",
+    device: str = "cpu",
   ) -> None:
     data = np.load(motion_file)
+    joint_reindex = None
+    body_reindex = None
+    if motion_type == "isaaclab":
+      joint_reindex = _ISAACLAB_TO_MUJOCO_JOINT_REINDEX
+      body_reindex = _ISAACLAB_TO_MUJOCO_BODY_REINDEX
+    elif motion_type != "mujoco":
+      raise ValueError(f"Unsupported motion_type: {motion_type}")
+
     self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
     self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
-    self._body_pos_w = torch.tensor(
-      data["body_pos_w"], dtype=torch.float32, device=device
-    )
-    self._body_quat_w = torch.tensor(
-      data["body_quat_w"], dtype=torch.float32, device=device
-    )
-    self._body_lin_vel_w = torch.tensor(
-      data["body_lin_vel_w"], dtype=torch.float32, device=device
-    )
-    self._body_ang_vel_w = torch.tensor(
-      data["body_ang_vel_w"], dtype=torch.float32, device=device
-    )
+    self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
+    self._body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
+    self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
+    self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+    if joint_reindex is not None:
+      self.joint_pos = self.joint_pos[:, joint_reindex]
+      self.joint_vel = self.joint_vel[:, joint_reindex]
+    if body_reindex is not None:
+      self._body_pos_w = self._body_pos_w[:, body_reindex, :]
+      self._body_quat_w = self._body_quat_w[:, body_reindex, :]
+      self._body_lin_vel_w = self._body_lin_vel_w[:, body_reindex, :]
+      self._body_ang_vel_w = self._body_ang_vel_w[:, body_reindex, :]
     self._body_indexes = body_indexes
     self.body_pos_w = self._body_pos_w[:, self._body_indexes]
     self.body_quat_w = self._body_quat_w[:, self._body_indexes]
@@ -79,7 +228,10 @@ class MotionCommand(CommandTerm):
     )
 
     self.motion = MotionLoader(
-      self.cfg.motion_file, self.body_indexes, device=self.device
+      self.cfg.motion_file,
+      self.body_indexes,
+      motion_type=self.cfg.motion_type,
+      device=self.device,
     )
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.body_pos_relative_w = torch.zeros(
@@ -116,7 +268,13 @@ class MotionCommand(CommandTerm):
     self.metrics["error_joint_pos"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_joint_vel"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["sampling_entropy"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["sampling_uniform_prob"] = torch.zeros(
+      self.num_envs, device=self.device
+    )
     self.metrics["sampling_top1_prob"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["sampling_top1_ratio"] = torch.zeros(
+      self.num_envs, device=self.device
+    )
     self.metrics["sampling_top1_bin"] = torch.zeros(self.num_envs, device=self.device)
 
     self._ghost_model = None
@@ -271,6 +429,7 @@ class MotionCommand(CommandTerm):
     ).view(-1)
 
     sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
+    uniform_prob = 1.0 / float(self.bin_count)
 
     sampled_bins = torch.multinomial(
       sampling_probabilities, len(env_ids), replacement=True
@@ -286,15 +445,20 @@ class MotionCommand(CommandTerm):
     H_norm = H / math.log(self.bin_count) if self.bin_count > 1 else 1.0
     pmax, imax = sampling_probabilities.max(dim=0)
     self.metrics["sampling_entropy"][:] = H_norm
+    self.metrics["sampling_uniform_prob"][:] = uniform_prob
     self.metrics["sampling_top1_prob"][:] = pmax
+    self.metrics["sampling_top1_ratio"][:] = pmax / uniform_prob
     self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
   def _uniform_sampling(self, env_ids: torch.Tensor):
+    uniform_prob = 1.0 / float(self.bin_count)
     self.time_steps[env_ids] = torch.randint(
       0, self.motion.time_step_total, (len(env_ids),), device=self.device
     )
     self.metrics["sampling_entropy"][:] = 1.0  # Maximum entropy for uniform.
-    self.metrics["sampling_top1_prob"][:] = 1.0 / self.bin_count
+    self.metrics["sampling_uniform_prob"][:] = uniform_prob
+    self.metrics["sampling_top1_prob"][:] = uniform_prob
+    self.metrics["sampling_top1_ratio"][:] = 1.0
     self.metrics["sampling_top1_bin"][:] = 0.5  # No specific bin preference.
 
   def _write_reference_state_to_sim(
@@ -581,6 +745,7 @@ class MotionCommand(CommandTerm):
 @dataclass(kw_only=True)
 class MotionCommandCfg(CommandTermCfg):
   motion_file: str
+  motion_type: Literal["isaaclab", "mujoco"] = "isaaclab"
   anchor_body_name: str
   body_names: tuple[str, ...]
   entity_name: str
