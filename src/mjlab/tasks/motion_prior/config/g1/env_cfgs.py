@@ -24,8 +24,12 @@ from mjlab.tasks.motion_prior.observations_cfg import (
   make_student_obs_group,
   make_teacher_a_obs_groups,
   make_teacher_b_obs_group,
+  make_teacher_trackingbfm_obs_group,
 )
-from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
+from mjlab.tasks.tracking.config.g1.env_cfgs import (
+  unitree_g1_flat_tracking_bfm_env_cfg,
+  unitree_g1_flat_tracking_env_cfg,
+)
 from mjlab.tasks.tracking.mdp.commands import (
   MotionCommandCfg as SingleMotionCommandCfg,
 )
@@ -155,3 +159,56 @@ def unitree_g1_rough_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlE
 def unitree_g1_flat_motion_prior_vq_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """VQ variant — same env as VAE flat; algorithm differs at runner level."""
   return unitree_g1_flat_motion_prior_env_cfg(play=play)
+
+
+def unitree_g1_flat_motion_prior_single_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Flat single-encoder motion-prior env (trackingbfm teacher_t branch).
+
+  Inherits :func:`unitree_g1_flat_tracking_bfm_env_cfg` (multi-motion
+  command + trackingbfm-style actor obs schema), then replaces the
+  observation set with ``student`` + ``teacher_t``. ``teacher_t`` mirrors
+  the trackingbfm actor terms exactly so the frozen teacher sees its
+  training-time input distribution.
+
+  The multi-motion command keeps the trackingbfm defaults
+  (``history_steps=5, future_steps=5``) — these drive the dim of
+  ``command`` / ``anchor_lin_vel_w`` in the teacher obs and must match
+  the ckpt being loaded. Override via CLI only if loading a teacher
+  trained with different settings.
+
+  Rewards are trimmed to motion-anchor tracking (loss is computed from
+  teacher actions, not env reward; the reward signal is kept only so
+  episode logs remain meaningful).
+  """
+  cfg = unitree_g1_flat_tracking_bfm_env_cfg(has_state_estimation=True, play=play)
+
+  # Inject a terrain_scan raycast so the student obs has an identical
+  # height_scan slice across all motion-prior variants. Same spec as the
+  # rough env's terrain_scan; flat plane returns a constant height but the
+  # dim and code path match deploy / dual-env distillation.
+  existing = tuple(cfg.scene.sensors or ())
+  if not any(s.name == "terrain_scan" for s in existing):
+    cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
+
+  enable_corruption = not play
+  cfg.observations = {
+    "student": make_student_obs_group(
+      enable_corruption=enable_corruption,
+      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+    ),
+    "teacher_t": make_teacher_trackingbfm_obs_group(
+      command_name="motion",
+      enable_corruption=enable_corruption,
+    ),
+  }
+
+  cfg.rewards = {
+    "motion_global_anchor_pos": RewardTermCfg(
+      func=mdp.motion_global_anchor_position_error_exp,
+      weight=0.5,
+      params={"command_name": "motion", "std": 0.3},
+    ),
+  }
+  return cfg

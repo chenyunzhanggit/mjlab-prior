@@ -131,9 +131,25 @@ def unitree_g1_flat_tracking_bfm_env_cfg(
   has_state_estimation: bool = True,
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-  """Create the multi-motion Unitree G1 flat terrain tracking configuration."""
-  return _unitree_g1_flat_tracking_env_cfg(
+  """Create the multi-motion Unitree G1 flat terrain tracking configuration.
+
+  Pins ``history_steps=0`` / ``future_steps=1`` to match how tracking_bfm
+  actually trains this task (see
+  ``tracking_bfm/scripts/train_tracking_adaptive_sampling*.sh`` —
+  every script overrides these via CLI). The dataclass defaults
+  (``history_steps=5, future_steps=5`` in :class:`MultiMotionCommandCfg`)
+  inflate the ``command`` obs to 580-dim and ``anchor_*_vel_w`` to 30-dim,
+  which is **not** what the trackingbfm PPO runner is sized for; running
+  with the defaults leaves the actor unable to track and episodes
+  terminate after a single step.
+  """
+  cfg = _unitree_g1_flat_tracking_env_cfg(
     MultiMotionCommandCfg,
     has_state_estimation=has_state_estimation,
     play=play,
   )
+  motion_cmd = cfg.commands["motion"]
+  assert isinstance(motion_cmd, MultiMotionCommandCfg)
+  motion_cmd.history_steps = 0
+  motion_cmd.future_steps = 1
+  return cfg

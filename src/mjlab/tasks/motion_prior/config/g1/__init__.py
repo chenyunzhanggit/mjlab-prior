@@ -6,6 +6,8 @@ from mjlab.tasks.motion_prior.rl import (
   DownStreamOnPolicyRunner,
   DownStreamVQOnPolicyRunner,
   MotionPriorOnPolicyRunner,
+  MotionPriorSingleOnPolicyRunner,
+  MotionPriorSingleVQOnPolicyRunner,
   MotionPriorVQOnPolicyRunner,
 )
 from mjlab.tasks.registry import register_mjlab_task
@@ -13,11 +15,14 @@ from mjlab.tasks.registry import register_mjlab_task
 from .downstream_env_cfgs import unitree_g1_downstream_velocity_env_cfg
 from .env_cfgs import (
   unitree_g1_flat_motion_prior_env_cfg,
+  unitree_g1_flat_motion_prior_single_env_cfg,
   unitree_g1_flat_motion_prior_vq_env_cfg,
   unitree_g1_rough_motion_prior_env_cfg,
 )
 from .rl_cfg import (
   unitree_g1_motion_prior_runner_cfg,
+  unitree_g1_motion_prior_single_runner_cfg,
+  unitree_g1_motion_prior_single_vq_runner_cfg,
   unitree_g1_motion_prior_vq_runner_cfg,
 )
 
@@ -46,6 +51,29 @@ register_mjlab_task(
   play_env_cfg=unitree_g1_flat_motion_prior_vq_env_cfg(play=True),
   rl_cfg=unitree_g1_motion_prior_vq_runner_cfg(),
   runner_cls=MotionPriorVQOnPolicyRunner,
+)
+
+# Single-encoder variant (one frozen trackingbfm teacher, one encoder).
+# Hosts on the trackingbfm flat env so the teacher sees the same actor
+# obs schema it was trained on. teacher_policy_path supplied via CLI:
+#   --agent.teacher-policy-path /path/to/model_xxx.pt
+register_mjlab_task(
+  task_id="Mjlab-MotionPrior-Single-Trackingbfm-Unitree-G1",
+  env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(),
+  play_env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(play=True),
+  rl_cfg=unitree_g1_motion_prior_single_runner_cfg(),
+  runner_cls=MotionPriorSingleOnPolicyRunner,
+)
+
+# Single-encoder VQ-VAE variant. Same env as the VAE single-encoder task
+# (the teacher_t obs schema is identical); only runner / policy /
+# algorithm differ (codebook + EMA quantizer in place of μ/σ heads + KL).
+register_mjlab_task(
+  task_id="Mjlab-MotionPrior-Single-VQ-Trackingbfm-Unitree-G1",
+  env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(),
+  play_env_cfg=unitree_g1_flat_motion_prior_single_env_cfg(play=True),
+  rl_cfg=unitree_g1_motion_prior_single_vq_runner_cfg(),
+  runner_cls=MotionPriorSingleVQOnPolicyRunner,
 )
 
 # VQ rough variant — same rough env as the VAE rough task; only the

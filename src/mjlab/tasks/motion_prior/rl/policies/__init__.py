@@ -7,6 +7,12 @@ from mjlab.tasks.motion_prior.rl.policies.downstream_vq_policy import (
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_policy import (
   MotionPriorPolicy as MotionPriorPolicy,
 )
+from mjlab.tasks.motion_prior.rl.policies.motion_prior_single_encoder_policy import (
+  MotionPriorSingleEncoderPolicy as MotionPriorSingleEncoderPolicy,
+)
+from mjlab.tasks.motion_prior.rl.policies.motion_prior_single_encoder_vq_policy import (
+  MotionPriorSingleEncoderVQPolicy as MotionPriorSingleEncoderVQPolicy,
+)
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
   MotionPriorVQPolicy as MotionPriorVQPolicy,
 )

@@ -190,6 +190,84 @@ def make_teacher_a_obs_groups(
   return actor, history
 
 
+def _teacher_trackingbfm_terms(command_name: str) -> dict[str, ObservationTermCfg]:
+  """Trackingbfm tracking actor obs (env-dependent dim).
+
+  Mirrors ``mjlab/tasks/tracking/tracking_env_cfg.py:teacher_actor_terms`` —
+  the exact 10 terms used to train the trackingbfm PPO policy. Per-term
+  noise levels match training time so the teacher sees the same
+  distribution at distillation time.
+
+  Total dim depends on the host env's ``MultiMotionCommandCfg``
+  ``history_steps`` / ``future_steps``: ``command`` (= cat of motion
+  joint pos/vel) is ``2 * num_steps_total * num_joints``; the other terms
+  (``motion_anchor_pos_b`` rot6d, IMU, joint_pos/vel, last_action) are
+  fixed-size.
+  """
+  return {
+    "command": ObservationTermCfg(
+      func=mdp.generated_commands, params={"command_name": command_name}
+    ),
+    "motion_anchor_pos_b": ObservationTermCfg(
+      func=mdp.motion_anchor_pos_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.25, n_max=0.25),
+    ),
+    "motion_anchor_ori_b": ObservationTermCfg(
+      func=mdp.motion_anchor_ori_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+    "body_pos": ObservationTermCfg(
+      func=mdp.robot_body_pos_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.25, n_max=0.25),
+    ),
+    "body_ori": ObservationTermCfg(
+      func=mdp.robot_body_ori_b,
+      params={"command_name": command_name},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
+    "base_lin_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor,
+      params={"sensor_name": "robot/imu_lin_vel"},
+      noise=Unoise(n_min=-0.5, n_max=0.5),
+    ),
+    "base_ang_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor,
+      params={"sensor_name": "robot/imu_ang_vel"},
+      noise=Unoise(n_min=-0.2, n_max=0.2),
+    ),
+    "joint_pos": ObservationTermCfg(
+      func=mdp.joint_pos_rel,
+      noise=Unoise(n_min=-0.01, n_max=0.01),
+    ),
+    "joint_vel": ObservationTermCfg(
+      func=mdp.joint_vel_rel,
+      noise=Unoise(n_min=-0.5, n_max=0.5),
+    ),
+    "actions": ObservationTermCfg(func=mdp.last_action),
+  }
+
+
+def make_teacher_trackingbfm_obs_group(
+  command_name: str = "motion",
+  enable_corruption: bool = True,
+) -> ObservationGroupCfg:
+  """Build the teacher_t actor observation group for the trackingbfm teacher.
+
+  Single 1-D group; the trackingbfm teacher is a plain MLP (no temporal
+  path). Term schemas are intentionally identical to the tracking env's
+  ``teacher_actor_terms`` so the frozen teacher sees the same input
+  distribution it was trained on.
+  """
+  return ObservationGroupCfg(
+    terms=_teacher_trackingbfm_terms(command_name),
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
+  )
+
+
 def make_teacher_b_obs_group(
   twist_command_name: str = "twist",
   height_scan_sensor_name: str = "terrain_scan",
