@@ -150,27 +150,20 @@ class MotionPriorSingleVQOnPolicyRunner(MotionPriorSingleOnPolicyRunner):
     collect_t: float,
     learn_t: float,
   ) -> None:
-    import statistics
-
-    rew = statistics.fmean(self._rew_buf) if self._rew_buf else 0.0
-    length = statistics.fmean(self._len_buf) if self._len_buf else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior={loss_dict.get('loss/behavior', 0):.4f} "
-      f"commit={loss_dict.get('loss/commit', 0):.4f} "
-      f"mp={loss_dict.get('loss/mp', 0):.4f} "
-      f"ar1={loss_dict.get('loss/ar1', 0):.4f} "
-      f"perp={loss_dict.get('perplexity', 0):.1f} "
-      f"rew={rew:.2f} len={length:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+    """VQ-flavored print: commit / mp / perplexity instead of KL."""
+    self._log_iteration_combined(
+      it,
+      loss_dict,
+      collect_t,
+      learn_t,
+      print_keys=(
+        "loss/behavior",
+        "loss/commit",
+        "loss/mp",
+        "loss/ar1",
+        "perplexity",
+      ),
     )
-    if self._writer is not None:
-      for k, v in loss_dict.items():
-        self._writer.add_scalar(k, v, it)
-      self._writer.add_scalar("episode/reward", rew, it)
-      self._writer.add_scalar("episode/length", length, it)
-      self._writer.add_scalar("time/collect", collect_t, it)
-      self._writer.add_scalar("time/learn", learn_t, it)
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #

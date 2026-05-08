@@ -67,6 +67,35 @@ def _t(td: TensorDict, key: str) -> torch.Tensor:
   return cast(torch.Tensor, td[key])
 
 
+def _average_ep_infos(ep_infos: list[dict[str, Any]]) -> dict[str, float]:
+  """Average each scalar key across captured ``extras["log"]`` snapshots.
+
+  The framework emits one snapshot per step that has any reset_env_ids;
+  values are already aggregated per-step (e.g.
+  ``Episode_Termination/anchor_pos`` is "how many envs terminated due to
+  ``anchor_pos`` THIS reset"). Mean across snapshots gives the per-step
+  rate, which is roughly what ``len_buf`` measures inversely.
+
+  Tensors and 0-d tensors are coerced to floats; non-numeric entries are
+  silently dropped.
+  """
+  if not ep_infos:
+    return {}
+  agg: dict[str, list[float]] = {}
+  for snap in ep_infos:
+    for k, v in snap.items():
+      if isinstance(v, torch.Tensor):
+        if v.numel() != 1:
+          continue
+        v = float(v.item())
+      try:
+        v = float(v)
+      except (TypeError, ValueError):
+        continue
+      agg.setdefault(k, []).append(v)
+  return {k: statistics.fmean(vs) for k, vs in agg.items()}
+
+
 class MotionPriorOnPolicyRunner:
   """Dual-env VAE motion-prior distillation runner."""
 
@@ -143,6 +172,17 @@ class MotionPriorOnPolicyRunner:
     self._cur_rew_b = torch.zeros(self.env_b.num_envs, device=device)
     self._cur_len_b = torch.zeros(self.env_b.num_envs, device=device)
 
+    # ----- ep_info accumulators for env-side metrics (termination
+    # rates, per-reward components, command_manager metrics).
+    # Cleared each iteration after ``_log_iteration`` flushes them.
+    self._ep_infos_a: list[dict[str, Any]] = []
+    self._ep_infos_b: list[dict[str, Any]] = []
+
+    # ----- Cumulative timing for ETA estimation. -------------------------
+    self._tot_timesteps: int = 0
+    self._tot_time: float = 0.0
+    self._start_iter: int = 0
+
   # --------------------------------------------------------------------- #
   # Policy / algorithm construction (overridable by VQ subclass)          #
   # --------------------------------------------------------------------- #
@@ -216,6 +256,8 @@ class MotionPriorOnPolicyRunner:
     obs_b = self.env_b.get_observations()
 
     start_it = self.current_learning_iteration
+    self._start_iter = start_it
+    self._num_learning_iterations = num_learning_iterations
     end_it = start_it + num_learning_iterations
     for it in range(start_it, end_it):
       t0 = time.time()
@@ -310,9 +352,22 @@ class MotionPriorOnPolicyRunner:
       prog_b.append(self.env_b.episode_length_buf.detach().clone().to(self.device))
 
       # Step both envs with detached student actions.
-      obs_a, rew_a, done_a, _ = self.env.step(sa_a_step.detach())
-      obs_b, rew_b, done_b, _ = self.env_b.step(sa_b_step.detach())
+      obs_a, rew_a, done_a, infos_a = self.env.step(sa_a_step.detach())
+      obs_b, rew_b, done_b, infos_b = self.env_b.step(sa_b_step.detach())
       self._track_episode_stats(rew_a, done_a, rew_b, done_b)
+
+      # Capture per-iteration episode infos. ``ManagerBasedRlEnv`` puts
+      # per-manager reset metrics under ``extras["log"]`` whenever an env
+      # resets — termination rates, per-reward components, command-term
+      # error metrics, etc. The dict is overwritten each step but
+      # ``RslRlVecEnvWrapper`` returns the latest snapshot, so capture
+      # whichever step had any reset_env_ids (``"log"`` is non-empty).
+      log_a = infos_a.get("log") if isinstance(infos_a, dict) else None
+      if log_a:
+        self._ep_infos_a.append(log_a)
+      log_b = infos_b.get("log") if isinstance(infos_b, dict) else None
+      if log_b:
+        self._ep_infos_b.append(log_b)
 
     # ---- stack to (n_envs, T, ...) and flatten to (n_envs * T, ...) ------
     def _flat(seq: list[torch.Tensor]) -> torch.Tensor:
@@ -408,31 +463,135 @@ class MotionPriorOnPolicyRunner:
     collect_t: float,
     learn_t: float,
   ) -> None:
+    """Mirror motionprior reference's log() — terminal pretty-print +
+    writer scalars under ``Episode/`` / ``Loss/`` / ``Train/`` / ``Perf/``.
+
+    Per-iteration env metrics (termination rates, per-reward components,
+    command-term errors) live in the captured ``_ep_infos_*`` lists which
+    we average and flush here. ``ep_infos`` keys with ``/`` already in
+    them (e.g. ``Episode_Termination/anchor_pos`` from
+    ``termination_manager.reset``) are passed through as-is; bare keys
+    get an ``Episode_a/`` or ``Episode_b/`` prefix so the two envs don't
+    collide on the writer.
+    """
+    self._log_iteration_combined(it, loss_dict, collect_t, learn_t)
+
+  def _log_iteration_combined(
+    self,
+    it: int,
+    loss_dict: dict[str, float],
+    collect_t: float,
+    learn_t: float,
+    behavior_keys: tuple[str, ...] = ("loss/behavior_a", "loss/behavior_b"),
+    kl_keys: tuple[str, ...] = ("loss/kl_a", "loss/kl_b"),
+    ar1_keys: tuple[str, ...] = ("loss/ar1_a", "loss/ar1_b"),
+    extra_keys: tuple[str, ...] = (),
+  ) -> None:
+    """Shared logging body, parameterized over which loss keys to print.
+
+    VQ subclass overrides ``_log_iteration`` to swap KL for commit / mp /
+    perplexity in the terminal preview while still flushing every
+    ``loss_dict`` key to the writer.
+    """
+    iteration_time = collect_t + learn_t
+    collection_size = self.num_steps_per_env * (self.env.num_envs + self.env_b.num_envs)
+    self._tot_timesteps += collection_size
+    self._tot_time += iteration_time
+    fps = int(collection_size / max(iteration_time, 1e-9))
+
     rew_a = statistics.fmean(self._rew_buf_a) if self._rew_buf_a else 0.0
     rew_b = statistics.fmean(self._rew_buf_b) if self._rew_buf_b else 0.0
     len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
     len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
-      f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
-      f"kl_a={loss_dict.get('loss/kl_a', 0):.4f} "
-      f"kl_b={loss_dict.get('loss/kl_b', 0):.4f} "
-      f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
-      f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
-      f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
-      f"len_a={len_a:.0f} len_b={len_b:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+
+    # ---- Aggregate ep_infos (per-env) ---------------------------------
+    ep_a = _average_ep_infos(self._ep_infos_a)
+    ep_b = _average_ep_infos(self._ep_infos_b)
+    self._ep_infos_a.clear()
+    self._ep_infos_b.clear()
+
+    # ---- Terminal print ----------------------------------------------
+    header = (
+      f"\n{'=' * 72}\n"
+      f" Learning iteration {it}/{self._start_iter + self._num_learning_iterations}\n"
+      f"{'-' * 72}\n"
     )
+    losses_str = " ".join(
+      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
+      for k in (*behavior_keys, *kl_keys, *ar1_keys, *extra_keys)
+      if k in loss_dict
+    )
+    eta = self._format_eta(it)
+    print(
+      f"{header}"
+      f" Computation:    {fps} steps/s (collect {collect_t:.2f}s, learn {learn_t:.2f}s)\n"
+      f" Losses:         {losses_str}\n"
+      f" Train (flat):   rew={rew_a:.2f}  len={len_a:.1f}\n"
+      f" Train (rough):  rew={rew_b:.2f}  len={len_b:.1f}\n"
+      f" Total steps:    {self._tot_timesteps}  Elapsed: "
+      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}  ETA: {eta}\n"
+      f"{'=' * 72}",
+      flush=True,
+    )
+
+    # ---- Print top termination rates if present -----------------------
+    self._print_top_terminations(ep_a, ep_b)
+
+    # ---- Writer flush -------------------------------------------------
     if self._writer is not None:
+      # Losses
       for k, v in loss_dict.items():
-        self._writer.add_scalar(k, v, it)
-      self._writer.add_scalar("episode/reward_a", rew_a, it)
-      self._writer.add_scalar("episode/reward_b", rew_b, it)
-      self._writer.add_scalar("episode/length_a", len_a, it)
-      self._writer.add_scalar("episode/length_b", len_b, it)
-      self._writer.add_scalar("time/collect", collect_t, it)
-      self._writer.add_scalar("time/learn", learn_t, it)
+        self._writer.add_scalar(f"Loss/{k.split('/')[-1]}", v, it)
+      # Train aggregates
+      self._writer.add_scalar("Train/mean_reward_a", rew_a, it)
+      self._writer.add_scalar("Train/mean_reward_b", rew_b, it)
+      self._writer.add_scalar("Train/mean_episode_length_a", len_a, it)
+      self._writer.add_scalar("Train/mean_episode_length_b", len_b, it)
+      # Perf
+      self._writer.add_scalar("Perf/total_fps", fps, it)
+      self._writer.add_scalar("Perf/collection_time", collect_t, it)
+      self._writer.add_scalar("Perf/learning_time", learn_t, it)
+      # Per-env episode metrics
+      for k, v in ep_a.items():
+        if "/" in k:  # already namespaced (e.g. Episode_Termination/...)
+          self._writer.add_scalar(f"{k}/a", v, it)
+        else:
+          self._writer.add_scalar(f"Episode_a/{k}", v, it)
+      for k, v in ep_b.items():
+        if "/" in k:
+          self._writer.add_scalar(f"{k}/b", v, it)
+        else:
+          self._writer.add_scalar(f"Episode_b/{k}", v, it)
+
+  def _print_top_terminations(
+    self, ep_a: dict[str, float], ep_b: dict[str, float]
+  ) -> None:
+    """Surface termination rates so the user can see *which* termination
+    is firing — critical for debugging short episode_len."""
+
+    def _filter(ep: dict[str, float]) -> list[tuple[str, float]]:
+      items = [
+        (k.split("/")[-1], v)
+        for k, v in ep.items()
+        if k.startswith("Episode_Termination/") and v > 0
+      ]
+      return sorted(items, key=lambda kv: -kv[1])
+
+    top_a = _filter(ep_a)
+    top_b = _filter(ep_b)
+    if top_a or top_b:
+      msg_a = ", ".join(f"{n}={v:.0f}" for n, v in top_a) or "—"
+      msg_b = ", ".join(f"{n}={v:.0f}" for n, v in top_b) or "—"
+      print(f" Term (flat):    {msg_a}")
+      print(f" Term (rough):   {msg_b}")
+
+  def _format_eta(self, it: int) -> str:
+    iters_done = max(it - self._start_iter + 1, 1)
+    iters_left = self._start_iter + self._num_learning_iterations - it - 1
+    if iters_done <= 0 or iters_left <= 0:
+      return "--:--:--"
+    eta_secs = self._tot_time / iters_done * iters_left
+    return time.strftime("%H:%M:%S", time.gmtime(eta_secs))
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #
@@ -730,34 +889,16 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     learn_t: float,
   ) -> None:
     """VQ-flavored print: commit / mp / perplexity instead of KL."""
-    rew_a = statistics.fmean(self._rew_buf_a) if self._rew_buf_a else 0.0
-    rew_b = statistics.fmean(self._rew_buf_b) if self._rew_buf_b else 0.0
-    len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
-    len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
-      f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
-      f"commit_a={loss_dict.get('loss/commit_a', 0):.4f} "
-      f"commit_b={loss_dict.get('loss/commit_b', 0):.4f} "
-      f"mp={loss_dict.get('loss/mp', 0):.4f} "
-      f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
-      f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
-      f"perp_a={loss_dict.get('perplexity_a', 0):.1f} "
-      f"perp_b={loss_dict.get('perplexity_b', 0):.1f} "
-      f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
-      f"len_a={len_a:.0f} len_b={len_b:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+    self._log_iteration_combined(
+      it,
+      loss_dict,
+      collect_t,
+      learn_t,
+      behavior_keys=("loss/behavior_a", "loss/behavior_b"),
+      kl_keys=("loss/commit_a", "loss/commit_b", "loss/mp"),
+      ar1_keys=("loss/ar1_a", "loss/ar1_b"),
+      extra_keys=("perplexity_a", "perplexity_b"),
     )
-    if self._writer is not None:
-      for k, v in loss_dict.items():
-        self._writer.add_scalar(k, v, it)
-      self._writer.add_scalar("episode/reward_a", rew_a, it)
-      self._writer.add_scalar("episode/reward_b", rew_b, it)
-      self._writer.add_scalar("episode/length_a", len_a, it)
-      self._writer.add_scalar("episode/length_b", len_b, it)
-      self._writer.add_scalar("time/collect", collect_t, it)
-      self._writer.add_scalar("time/learn", learn_t, it)
 
   def save(self, path: str, infos: dict | None = None) -> None:
     """Persist trainable VAE-VQ submodules + quantizer buffers + iter.

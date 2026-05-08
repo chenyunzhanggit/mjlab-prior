@@ -32,6 +32,7 @@ from mjlab.tasks.motion_prior.rl.algorithms.distillation_motion_prior_single imp
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_single_encoder_policy import (
   MotionPriorSingleEncoderPolicy,
 )
+from mjlab.tasks.motion_prior.rl.runner import _average_ep_infos
 
 
 def _t(td: TensorDict, key: str) -> torch.Tensor:
@@ -100,6 +101,18 @@ class MotionPriorSingleOnPolicyRunner:
     self._len_buf: deque[float] = deque(maxlen=100)
     self._cur_rew = torch.zeros(self.env.num_envs, device=device)
     self._cur_len = torch.zeros(self.env.num_envs, device=device)
+
+    # ----- ep_info accumulators (per-iteration, flushed in
+    # ``_log_iteration``). Same format as the dual runner —
+    # ``ManagerBasedRlEnv`` puts per-manager reset metrics under
+    # ``extras["log"]`` whenever an env resets.
+    self._ep_infos: list[dict[str, Any]] = []
+
+    # ----- Cumulative timing for ETA estimation. -------------------------
+    self._tot_timesteps: int = 0
+    self._tot_time: float = 0.0
+    self._start_iter: int = 0
+    self._num_learning_iterations: int = 0
 
   # --------------------------------------------------------------------- #
   # Policy / algorithm construction (overridable by VQ subclass)          #
@@ -180,6 +193,8 @@ class MotionPriorSingleOnPolicyRunner:
     obs = self.env.get_observations()
 
     start_it = self.current_learning_iteration
+    self._start_iter = start_it
+    self._num_learning_iterations = num_learning_iterations
     end_it = start_it + num_learning_iterations
     for it in range(start_it, end_it):
       t0 = time.time()
@@ -238,8 +253,11 @@ class MotionPriorSingleOnPolicyRunner:
       t_act_buf.append(teacher_action.detach().clone())
       prog_buf.append(self.env.episode_length_buf.detach().clone().to(self.device))
 
-      obs, rew, done, _ = self.env.step(sa_step.detach())
+      obs, rew, done, infos = self.env.step(sa_step.detach())
       self._track_episode_stats(rew, done)
+      log = infos.get("log") if isinstance(infos, dict) else None
+      if log:
+        self._ep_infos.append(log)
 
     def _flat(seq: list[torch.Tensor]) -> torch.Tensor:
       return torch.stack(seq, dim=1).flatten(0, 1)
@@ -299,23 +317,103 @@ class MotionPriorSingleOnPolicyRunner:
     collect_t: float,
     learn_t: float,
   ) -> None:
+    self._log_iteration_combined(
+      it,
+      loss_dict,
+      collect_t,
+      learn_t,
+      print_keys=("loss/behavior", "loss/kl", "loss/ar1"),
+    )
+
+  def _log_iteration_combined(
+    self,
+    it: int,
+    loss_dict: dict[str, float],
+    collect_t: float,
+    learn_t: float,
+    print_keys: tuple[str, ...] = (),
+  ) -> None:
+    """Single-env logging body parameterized over which loss keys to
+    surface in the terminal preview. VQ subclass overrides ``print_keys``
+    to swap KL → commit / mp / perplexity.
+
+    Per-iteration env metrics live in ``_ep_infos`` (captured from each
+    ``env.step``'s ``extras["log"]``); we average and flush them here.
+    Keys with ``/`` already in them (e.g. ``Episode_Termination/...``)
+    pass through; bare keys get an ``Episode/`` prefix.
+    """
+    iteration_time = collect_t + learn_t
+    collection_size = self.num_steps_per_env * self.env.num_envs
+    self._tot_timesteps += collection_size
+    self._tot_time += iteration_time
+    fps = int(collection_size / max(iteration_time, 1e-9))
+
     rew = statistics.fmean(self._rew_buf) if self._rew_buf else 0.0
     length = statistics.fmean(self._len_buf) if self._len_buf else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior={loss_dict.get('loss/behavior', 0):.4f} "
-      f"kl={loss_dict.get('loss/kl', 0):.4f} "
-      f"ar1={loss_dict.get('loss/ar1', 0):.4f} "
-      f"rew={rew:.2f} len={length:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+
+    ep = _average_ep_infos(self._ep_infos)
+    self._ep_infos.clear()
+
+    losses_str = " ".join(
+      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
+      for k in print_keys
+      if k in loss_dict
     )
+    extra_loss_str = " ".join(
+      f"{k.split('/')[-1]}={loss_dict.get(k, 0.0):.4f}"
+      for k in loss_dict
+      if k not in print_keys and not k.startswith("schedule")
+    )
+    eta = self._format_eta(it)
+    header = (
+      f"\n{'=' * 72}\n"
+      f" Learning iteration {it}/{self._start_iter + self._num_learning_iterations}\n"
+      f"{'-' * 72}\n"
+    )
+    print(
+      f"{header}"
+      f" Computation:    {fps} steps/s (collect {collect_t:.2f}s, learn {learn_t:.2f}s)\n"
+      f" Losses:         {losses_str}{('  ' + extra_loss_str) if extra_loss_str else ''}\n"
+      f" Train:          rew={rew:.2f}  len={length:.1f}\n"
+      f" Total steps:    {self._tot_timesteps}  Elapsed: "
+      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}  ETA: {eta}\n"
+      f"{'=' * 72}",
+      flush=True,
+    )
+
+    # Show termination breakdown for debugging short episodes.
+    term_items = sorted(
+      (
+        (k.split("/")[-1], v)
+        for k, v in ep.items()
+        if k.startswith("Episode_Termination/") and v > 0
+      ),
+      key=lambda kv: -kv[1],
+    )
+    if term_items:
+      print(" Term:           " + ", ".join(f"{n}={v:.0f}" for n, v in term_items))
+
     if self._writer is not None:
       for k, v in loss_dict.items():
-        self._writer.add_scalar(k, v, it)
-      self._writer.add_scalar("episode/reward", rew, it)
-      self._writer.add_scalar("episode/length", length, it)
-      self._writer.add_scalar("time/collect", collect_t, it)
-      self._writer.add_scalar("time/learn", learn_t, it)
+        self._writer.add_scalar(f"Loss/{k.split('/')[-1]}", v, it)
+      self._writer.add_scalar("Train/mean_reward", rew, it)
+      self._writer.add_scalar("Train/mean_episode_length", length, it)
+      self._writer.add_scalar("Perf/total_fps", fps, it)
+      self._writer.add_scalar("Perf/collection_time", collect_t, it)
+      self._writer.add_scalar("Perf/learning_time", learn_t, it)
+      for k, v in ep.items():
+        if "/" in k:
+          self._writer.add_scalar(k, v, it)
+        else:
+          self._writer.add_scalar(f"Episode/{k}", v, it)
+
+  def _format_eta(self, it: int) -> str:
+    iters_done = max(it - self._start_iter + 1, 1)
+    iters_left = self._start_iter + self._num_learning_iterations - it - 1
+    if iters_done <= 0 or iters_left <= 0:
+      return "--:--:--"
+    eta_secs = self._tot_time / iters_done * iters_left
+    return time.strftime("%H:%M:%S", time.gmtime(eta_secs))
 
   # --------------------------------------------------------------------- #
   # Save / load                                                           #
