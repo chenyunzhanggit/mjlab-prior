@@ -67,6 +67,44 @@ def _t(td: TensorDict, key: str) -> torch.Tensor:
   return cast(torch.Tensor, td[key])
 
 
+def _make_writer(log_dir: str | None, train_cfg: dict, label: str = "MotionPrior"):
+  """Create a writer mirroring ``rsl_rl.utils.logger.Logger.init_logging_writer``.
+
+  Selects ``WandbSummaryWriter`` / ``SummaryWriter`` / ``NeptuneSummaryWriter``
+  based on ``train_cfg["logger"]`` (the same field
+  :class:`MjlabOnPolicyRunner` honors for the tracking task), so motion_prior
+  runs end up in the same dashboard pipeline as the tracking task. All
+  writers expose ``add_scalar`` so the ``_log_iteration`` body doesn't need
+  to branch on logger type.
+
+  ``WandbSummaryWriter`` extends ``SummaryWriter`` — when ``logger="wandb"``
+  the local tensorboard event file is written too, which means
+  ``tensorboard --logdir <run_dir>`` works regardless of which logger was
+  selected.
+  """
+  if log_dir is None:
+    return None
+  logger_type = str(train_cfg.get("logger", "tensorboard")).lower()
+  try:
+    if logger_type == "wandb":
+      from rsl_rl.utils.wandb_utils import WandbSummaryWriter
+
+      writer = WandbSummaryWriter(log_dir=log_dir, flush_secs=10, cfg=train_cfg)
+    elif logger_type == "neptune":
+      from rsl_rl.utils.neptune_utils import NeptuneSummaryWriter
+
+      writer = NeptuneSummaryWriter(log_dir=log_dir, flush_secs=10, cfg=train_cfg)
+    else:
+      from torch.utils.tensorboard import SummaryWriter
+
+      writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
+    print(f"[{label}] writer={logger_type} log_dir={log_dir}")
+    return writer
+  except Exception as e:
+    print(f"[{label}] {logger_type} writer unavailable, falling back to none ({e})")
+    return None
+
+
 def _average_ep_infos(ep_infos: list[dict[str, Any]]) -> dict[str, float]:
   """Average each scalar key across captured ``extras["log"]`` snapshots.
 
@@ -152,15 +190,14 @@ class MotionPriorOnPolicyRunner:
     self.save_interval = int(train_cfg.get("save_interval", 500))
     self.upload_model = bool(train_cfg.get("upload_model", False))
 
-    # ----- Optional SummaryWriter ----------------------------------------
-    self._writer = None
-    if log_dir is not None and train_cfg.get("logger", "tensorboard") == "tensorboard":
-      try:
-        from torch.utils.tensorboard import SummaryWriter
-
-        self._writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
-      except Exception as e:
-        print(f"[MotionPrior] tensorboard unavailable, skipping ({e})")
+    # ----- Writer (wandb / tensorboard / neptune) ------------------------
+    # Mirrors the tracking task's writer setup via ``rsl_rl.Logger`` so
+    # motion_prior runs land in the same dashboards. ``logger`` is read
+    # from ``train_cfg``; default is ``"wandb"`` per ``RslRlBaseRunnerCfg``,
+    # matching the tracking task. ``WandbSummaryWriter`` writes both the
+    # local tfevents file and pushes to W&B, so ``tensorboard --logdir``
+    # works regardless.
+    self._writer = _make_writer(log_dir, train_cfg, label="MotionPrior")
 
     # ----- Episode reward / length tracking (per-env) --------------------
     self._rew_buf_a: deque[float] = deque(maxlen=100)
@@ -282,6 +319,12 @@ class MotionPriorOnPolicyRunner:
         os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt")
       )
     if self._writer is not None:
+      # WandbSummaryWriter / NeptuneSummaryWriter expose ``stop()`` for
+      # backend cleanup (wandb.finish, neptune.stop). Plain
+      # ``SummaryWriter`` only has ``close()``.
+      stop_fn = getattr(self._writer, "stop", None)
+      if callable(stop_fn):
+        stop_fn()
       self._writer.close()
 
   # --------------------------------------------------------------------- #

@@ -32,7 +32,7 @@ from mjlab.tasks.motion_prior.rl.algorithms.distillation_motion_prior_single imp
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_single_encoder_policy import (
   MotionPriorSingleEncoderPolicy,
 )
-from mjlab.tasks.motion_prior.rl.runner import _average_ep_infos
+from mjlab.tasks.motion_prior.rl.runner import _average_ep_infos, _make_writer
 
 
 def _t(td: TensorDict, key: str) -> torch.Tensor:
@@ -86,15 +86,11 @@ class MotionPriorSingleOnPolicyRunner:
     self.save_interval = int(train_cfg.get("save_interval", 500))
     self.upload_model = bool(train_cfg.get("upload_model", False))
 
-    # ----- Optional SummaryWriter ------------------------------------
-    self._writer = None
-    if log_dir is not None and train_cfg.get("logger", "tensorboard") == "tensorboard":
-      try:
-        from torch.utils.tensorboard import SummaryWriter
-
-        self._writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
-      except Exception as e:
-        print(f"[MotionPriorSingle] tensorboard unavailable, skipping ({e})")
+    # ----- Writer (wandb / tensorboard / neptune) --------------------
+    # Mirrors the tracking task's writer setup via ``rsl_rl.Logger`` so
+    # motion_prior runs land in the same dashboards. ``logger`` is read
+    # from ``train_cfg``; default is ``"wandb"`` per ``RslRlBaseRunnerCfg``.
+    self._writer = _make_writer(log_dir, train_cfg, label="MotionPriorSingle")
 
     # ----- Episode reward / length tracking --------------------------
     self._rew_buf: deque[float] = deque(maxlen=100)
@@ -218,6 +214,9 @@ class MotionPriorSingleOnPolicyRunner:
         os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt")
       )
     if self._writer is not None:
+      stop_fn = getattr(self._writer, "stop", None)
+      if callable(stop_fn):
+        stop_fn()
       self._writer.close()
 
   # --------------------------------------------------------------------- #

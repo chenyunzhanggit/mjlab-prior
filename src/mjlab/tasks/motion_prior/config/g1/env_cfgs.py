@@ -172,11 +172,12 @@ def unitree_g1_flat_motion_prior_single_env_cfg(
   the trackingbfm actor terms exactly so the frozen teacher sees its
   training-time input distribution.
 
-  The multi-motion command keeps the trackingbfm defaults
-  (``history_steps=5, future_steps=5``) — these drive the dim of
-  ``command`` / ``anchor_lin_vel_w`` in the teacher obs and must match
-  the ckpt being loaded. Override via CLI only if loading a teacher
-  trained with different settings.
+  The multi-motion command inherits ``history_steps=0`` /
+  ``future_steps=1`` from :func:`unitree_g1_flat_tracking_bfm_env_cfg`
+  (which pins them to match how tracking_bfm actually trains the
+  trackingbfm teacher). The ``teacher_t`` obs dim therefore equals the
+  trackingbfm PPO actor's input dim, which is required for the frozen
+  teacher ckpt to load and run correctly.
 
   Rewards are trimmed to motion-anchor tracking (loss is computed from
   teacher actions, not env reward; the reward signal is kept only so
