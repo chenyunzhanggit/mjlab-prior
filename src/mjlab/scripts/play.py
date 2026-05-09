@@ -33,6 +33,29 @@ def _parse_wandb_dt(value: str | datetime) -> datetime:
   return value
 
 
+def _build_inference_policy(runner, device, inference_path: str):
+  """Pass ``path`` to the runner's ``get_inference_policy`` only if it
+  accepts it. ``MjlabOnPolicyRunner.get_inference_policy(device)`` doesn't,
+  motion_prior runners do (path ∈ {auto, encoder, encoder_a, encoder_b, deploy}).
+  """
+  import inspect
+
+  try:
+    sig = inspect.signature(runner.get_inference_policy)
+    accepts_path = "path" in sig.parameters
+  except (TypeError, ValueError):
+    accepts_path = False
+  if accepts_path:
+    path = None if inference_path == "auto" else inference_path
+    return runner.get_inference_policy(device=device, path=path)
+  if inference_path != "auto":
+    print(
+      f"[play] runner {type(runner).__name__} does not accept "
+      f"--inference-path; ignoring '{inference_path}'."
+    )
+  return runner.get_inference_policy(device=device)
+
+
 @dataclass(frozen=True)
 class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
@@ -50,6 +73,23 @@ class PlayConfig:
   """Override for motion_prior runner's teacher_a checkpoint path."""
   teacher_b_policy_path: str | None = None
   """Override for motion_prior runner's teacher_b checkpoint path."""
+  teacher_policy_path: str | None = None
+  """Override for single-encoder motion_prior runner's teacher checkpoint path
+  (the trackingbfm teacher loaded inside ``MotionPriorSingleEncoderPolicy`` /
+  ``MotionPriorSingleEncoderVQPolicy``)."""
+  inference_path: Literal["auto", "encoder", "encoder_a", "encoder_b", "deploy"] = (
+    "auto"
+  )
+  """Which inference path the motion_prior runner should use.
+
+  * ``encoder`` (single-encoder runners) — use the encoder + decoder, needs
+    ``teacher_t`` obs in the env. Equivalent to motionprior's "encoder" play.
+  * ``encoder_a`` / ``encoder_b`` (dual-encoder runners) — pick one of the
+    two encoders.
+  * ``deploy`` — proprio-only deploy path: ``motion_prior(prop)`` →
+    decoder. Equivalent to motionprior's "prior" play.
+  * ``auto`` (default) — pick ``encoder`` if the env exposes a teacher obs,
+    else ``deploy``."""
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -236,17 +276,23 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     agent_cfg_dict = asdict(agent_cfg)
-    # motion_prior runner reads ``teacher_a_policy_path`` / ``teacher_b_policy_path``
-    # off the agent cfg dict at __init__ time. Other tasks just ignore the keys.
+    # motion_prior runners read teacher ckpt paths off the agent cfg dict at
+    # __init__ time. Other tasks just ignore the unknown keys.
     if cfg.teacher_a_policy_path is not None:
       agent_cfg_dict["teacher_a_policy_path"] = cfg.teacher_a_policy_path
     if cfg.teacher_b_policy_path is not None:
       agent_cfg_dict["teacher_b_policy_path"] = cfg.teacher_b_policy_path
+    if cfg.teacher_policy_path is not None:
+      agent_cfg_dict["teacher_policy_path"] = cfg.teacher_policy_path
     runner = runner_cls(env, agent_cfg_dict, device=device)
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
-    policy = runner.get_inference_policy(device=device)
+    # The motion_prior runners' ``get_inference_policy`` accepts a ``path``
+    # kwarg to choose between encoder / encoder_a / encoder_b / deploy.
+    # ``MjlabOnPolicyRunner`` (tracking task) does not, so dispatch via
+    # signature inspection.
+    policy = _build_inference_policy(runner, device, cfg.inference_path)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -260,7 +306,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _ckpt_runner.get_inference_policy(device=device)
+      return _build_inference_policy(_ckpt_runner, device, cfg.inference_path)
 
     if cfg.wandb_run_path is None:
       ckpt_dir = resume_path.parent
