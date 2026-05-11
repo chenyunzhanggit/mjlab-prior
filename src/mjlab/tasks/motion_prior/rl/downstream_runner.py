@@ -35,6 +35,7 @@ from tensordict import TensorDict
 
 from mjlab.tasks.motion_prior.rl.algorithms import DownStreamPPO, DownStreamPpoCfg
 from mjlab.tasks.motion_prior.rl.policies import DownStreamPolicy
+from mjlab.tasks.motion_prior.rl.runner import _make_writer
 
 
 def _t(td: TensorDict, key: str) -> torch.Tensor:
@@ -125,15 +126,12 @@ class DownStreamOnPolicyRunner:
     self.num_steps_per_env = int(train_cfg.get("num_steps_per_env", 24))
     self.save_interval = int(train_cfg.get("save_interval", 500))
 
-    # ---- Optional SummaryWriter ---------------------------------------- #
-    self._writer = None
-    if log_dir is not None and train_cfg.get("logger", "tensorboard") == "tensorboard":
-      try:
-        from torch.utils.tensorboard import SummaryWriter
-
-        self._writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
-      except Exception as e:
-        print(f"[DownStream] tensorboard unavailable, skipping ({e})")
+    # ---- Writer (wandb / tensorboard / neptune) ------------------------ #
+    # Same dispatcher as the motion_prior runners, so the downstream task
+    # lands in the same wandb / tensorboard dashboards as the tracking
+    # task. ``logger`` is read from ``train_cfg`` (default ``"wandb"`` per
+    # ``RslRlBaseRunnerCfg``).
+    self._writer = _make_writer(log_dir, train_cfg, label="DownStream")
 
     # ---- Episode reward / length tracking ------------------------------ #
     self._rew_buf: deque[float] = deque(maxlen=100)
@@ -214,6 +212,11 @@ class DownStreamOnPolicyRunner:
         os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt")
       )
     if self._writer is not None:
+      # WandbSummaryWriter / NeptuneSummaryWriter expose ``stop()``;
+      # plain ``SummaryWriter`` only has ``close()``.
+      stop_fn = getattr(self._writer, "stop", None)
+      if callable(stop_fn):
+        stop_fn()
       self._writer.close()
 
   # ------------------------------------------------------------------ #
