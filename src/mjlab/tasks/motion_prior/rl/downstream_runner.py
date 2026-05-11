@@ -35,7 +35,7 @@ from tensordict import TensorDict
 
 from mjlab.tasks.motion_prior.rl.algorithms import DownStreamPPO, DownStreamPpoCfg
 from mjlab.tasks.motion_prior.rl.policies import DownStreamPolicy
-from mjlab.tasks.motion_prior.rl.runner import _make_writer
+from mjlab.tasks.motion_prior.rl.runner import _average_ep_infos, _make_writer
 
 
 def _t(td: TensorDict, key: str) -> torch.Tensor:
@@ -138,10 +138,20 @@ class DownStreamOnPolicyRunner:
     self._len_buf: deque[float] = deque(maxlen=100)
     self._cur_rew = torch.zeros(self.env.num_envs, device=device)
     self._cur_len = torch.zeros(self.env.num_envs, device=device)
-    # Per-term episodic-reward log: ``Episode_Reward/<name> -> deque`` of
-    # values reported by ``RewardManager.reset`` on each env reset (already
-    # normalized by ``max_episode_length_s``).
-    self._episode_log: dict[str, deque[float]] = {}
+
+    # ---- ep_info accumulator (same shape as motion_prior runners) ------ #
+    # ``ManagerBasedRlEnv`` puts per-manager reset metrics
+    # (``Episode_Reward/*``, ``Episode_Termination/*``, command metrics)
+    # under ``extras["log"]`` whenever an env resets. Snapshots are
+    # appended each step that has any reset_env_ids; ``_log_iteration``
+    # averages and flushes them, then clears.
+    self._ep_infos: list[dict[str, Any]] = []
+
+    # ---- Cumulative timing for ETA estimation -------------------------- #
+    self._tot_timesteps: int = 0
+    self._tot_time: float = 0.0
+    self._start_iter: int = 0
+    self._num_learning_iterations: int = 0
 
   def _build_policy(
     self,
@@ -190,6 +200,8 @@ class DownStreamOnPolicyRunner:
     obs = self.env.get_observations()
 
     start_it = self.current_learning_iteration
+    self._start_iter = start_it
+    self._num_learning_iterations = num_learning_iterations
     end_it = start_it + num_learning_iterations
     for it in range(start_it, end_it):
       t0 = time.time()
@@ -247,30 +259,16 @@ class DownStreamOnPolicyRunner:
       self._cur_len[done_idx] = 0.0
 
   def _track_episode_log(self, extras: dict) -> None:
-    """Drain ``extras['log']`` into per-key rolling buffers.
+    """Append a snapshot of ``extras["log"]`` for this step.
 
-    Mjlab's ``RewardManager.reset`` puts ``Episode_Reward/<name>`` floats
-    in here (already normalized by ``max_episode_length_s``) on every
-    env reset; ``TerminationManager`` / ``CommandManager`` add
-    ``Episode_Termination/*`` and command metrics. We accumulate them so
-    ``_log_iteration`` can print averaged per-term values.
+    ``ManagerBasedRlEnv`` overwrites ``extras["log"]`` each step (with
+    that step's reset metrics from ``RewardManager`` / ``TerminationManager``
+    / ``CommandManager``); we keep a list of all non-empty snapshots and
+    let ``_average_ep_infos`` collapse them in ``_log_iteration``.
     """
     log = extras.get("log") if isinstance(extras, dict) else None
-    if not log:
-      return
-    for k, v in log.items():
-      if torch.is_tensor(v):
-        v = float(v.item())
-      else:
-        try:
-          v = float(v)
-        except (TypeError, ValueError):
-          continue
-      buf = self._episode_log.get(k)
-      if buf is None:
-        buf = deque(maxlen=100)
-        self._episode_log[k] = buf
-      buf.append(v)
+    if log:
+      self._ep_infos.append(log)
 
   # ------------------------------------------------------------------ #
   # logging                                                             #
@@ -283,47 +281,87 @@ class DownStreamOnPolicyRunner:
     collect_t: float,
     learn_t: float,
   ) -> None:
+    """Console + writer log. Format mirrors ``rsl_rl.utils.logger.Logger.log``
+    (the same code path the mjlab tracking task and motion_prior runners
+    run through), so output is bit-aligned with the reference: width=80,
+    pad=40, banner with ``\\033[1m...\\033[0m``, ``Episode/`` /
+    ``Loss/`` / ``Perf/`` / ``Train/`` writer prefixes.
+    """
+    width = 80
+    pad = 40
+
+    iteration_time = collect_t + learn_t
+    collection_size = self.num_steps_per_env * self.env.num_envs
+    self._tot_timesteps += collection_size
+    self._tot_time += iteration_time
+    fps = int(collection_size / max(iteration_time, 1e-9))
+
     rew = statistics.fmean(self._rew_buf) if self._rew_buf else 0.0
     length = statistics.fmean(self._len_buf) if self._len_buf else 0.0
-    print(
-      f"[it {it}] "
-      f"surrogate={loss_dict.get('loss/surrogate', 0):.4f} "
-      f"value={loss_dict.get('loss/value', 0):.4f} "
-      f"entropy={loss_dict.get('loss/entropy', 0):.4f} "
-      f"lr={loss_dict.get('schedule/learning_rate', 0):.2e} "
-      f"rew={rew:.2f} len={length:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
-    )
 
-    # Per-reward-term breakdown (Episode_Reward/* from RewardManager).
-    # Sorted by absolute mean so the loudest terms float to the top.
-    reward_items: list[tuple[str, float]] = []
-    other_items: list[tuple[str, float]] = []
-    for k, buf in self._episode_log.items():
-      if not buf:
-        continue
-      mean = statistics.fmean(buf)
-      if k.startswith("Episode_Reward/"):
-        reward_items.append((k.removeprefix("Episode_Reward/"), mean))
-      else:
-        other_items.append((k, mean))
-    if reward_items:
-      reward_items.sort(key=lambda kv: -abs(kv[1]))
-      breakdown = "  ".join(f"{name}={val:+.3f}" for name, val in reward_items)
-      print(f"  rewards: {breakdown}")
-
+    # ---- Writer scalars (same prefixes as rsl_rl Logger) -------------
     if self._writer is not None:
       for k, v in loss_dict.items():
-        self._writer.add_scalar(k, v, it)
-      self._writer.add_scalar("episode/reward", rew, it)
-      self._writer.add_scalar("episode/length", length, it)
-      self._writer.add_scalar("time/collect", collect_t, it)
-      self._writer.add_scalar("time/learn", learn_t, it)
-      # Forward every Episode_Reward/* + other manager-reported scalar.
-      for k, v in reward_items:
-        self._writer.add_scalar(f"Episode_Reward/{k}", v, it)
-      for k, v in other_items:
-        self._writer.add_scalar(k, v, it)
+        # ``loss_dict`` keys come in as ``loss/<name>`` or
+        # ``schedule/<name>`` from the algo; rsl_rl Logger puts losses
+        # under ``Loss/<name>``. Strip the namespace prefix.
+        name = k.split("/", 1)[1] if "/" in k else k
+        self._writer.add_scalar(f"Loss/{name}", v, it)
+      self._writer.add_scalar("Perf/total_fps", fps, it)
+      self._writer.add_scalar("Perf/collection_time", collect_t, it)
+      self._writer.add_scalar("Perf/learning_time", learn_t, it)
+      self._writer.add_scalar("Train/mean_reward", rew, it)
+      self._writer.add_scalar("Train/mean_episode_length", length, it)
+
+    # ---- Episode extras flush (Episode_Reward / Episode_Termination / etc) ----
+    averaged = _average_ep_infos(self._ep_infos)
+    self._ep_infos.clear()
+    extras_string = ""
+    for k, v in averaged.items():
+      if "/" in k:
+        # Already namespaced (e.g. ``Episode_Reward/track_lin_vel_xy_exp``).
+        if self._writer is not None:
+          self._writer.add_scalar(k, v, it)
+        extras_string += f"{f'{k}:':>{pad}} {v:.4f}\n"
+      else:
+        if self._writer is not None:
+          self._writer.add_scalar(f"Episode/{k}", v, it)
+        extras_string += f"{f'Mean episode {k}:':>{pad}} {v:.4f}\n"
+
+    # ---- Console (matches rsl_rl Logger.log layout exactly) ----------
+    log_string = "#" * width + "\n"
+    log_string += (
+      f"\033[1m{f' Learning iteration {it}/{self._start_iter + self._num_learning_iterations} '.center(width)}\033[0m \n\n"
+    )
+    log_string += (
+      f"{'Total steps:':>{pad}} {self._tot_timesteps} \n"
+      f"{'Steps per second:':>{pad}} {fps:.0f} \n"
+      f"{'Collection time:':>{pad}} {collect_t:.3f}s \n"
+      f"{'Learning time:':>{pad}} {learn_t:.3f}s \n"
+    )
+    for k, v in loss_dict.items():
+      name = k.split("/", 1)[1] if "/" in k else k
+      log_string += f"{f'Mean {name} loss:':>{pad}} {v:.4f}\n"
+    if self._rew_buf:
+      log_string += f"{'Mean reward:':>{pad}} {rew:.2f}\n"
+      log_string += f"{'Mean episode length:':>{pad}} {length:.2f}\n"
+    log_string += extras_string
+
+    done_it = it + 1 - self._start_iter
+    remaining_it = self._num_learning_iterations - done_it
+    if done_it > 0 and remaining_it > 0:
+      eta_secs = self._tot_time / done_it * remaining_it
+      eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_secs))
+    else:
+      eta_str = "--:--:--"
+    log_string += "-" * width + "\n"
+    log_string += f"{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"
+    log_string += (
+      f"{'Time elapsed:':>{pad}} "
+      f"{time.strftime('%H:%M:%S', time.gmtime(self._tot_time))}\n"
+    )
+    log_string += f"{'ETA:':>{pad}} {eta_str}\n"
+    print(log_string, flush=True)
 
   # ------------------------------------------------------------------ #
   # save / load                                                         #
