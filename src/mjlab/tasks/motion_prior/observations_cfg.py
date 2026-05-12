@@ -11,9 +11,12 @@ Three groups are exposed:
                    actor obs schema (166-dim, 10 terms). The history group
                    shares the same terms with ``history_length=10,
                    flatten_history_dim=False`` for the Conv1D path.
-* ``teacher_b`` — mjlab ``Velocity-Rough-Unitree-G1`` actor obs schema
-                   (286-dim, 8 terms). Single 1-D group; teacher_b is a
-                   plain MLP with no history path.
+* ``teacher_b`` (+ ``teacher_b_height``) — mjlab ``Velocity-Rough-Unitree-G1``
+                   actor obs schema (May 2026 CNN+MLP architecture). The 1D
+                   group ``teacher_b`` carries proprio + twist command
+                   (99-dim, 7 terms); the 2D group ``teacher_b_height`` is
+                   the 11x17 height scan fed to ``CNNProjModel``'s CNN
+                   encoder. teacher_b has no history path.
 
 The teacher schemas mirror the obs that produced the supplied checkpoints
 (prior.md task #1). Changing them silently breaks teacher inference.
@@ -25,6 +28,7 @@ from copy import deepcopy
 
 from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.motion_prior import mdp
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -63,6 +67,34 @@ def make_student_height_scan_term(
     noise=Unoise(n_min=-0.1, n_max=0.1),
     scale=1.0 / max_distance,
     history_length=history_length,
+  )
+
+
+def make_student_depth_obs_group(
+  sensor_name: str = "camera",
+  data_type: str = "distance_to_image_plane_noised",
+  enable_corruption: bool = False,
+) -> ObservationGroupCfg:
+  """Depth-image student obs group (``[B, 1, H, W]``).
+
+  The sensor's noise pipeline (distance Gaussian, normalization, dropout,
+  crop+resize) already runs inside the camera, so corruption is disabled at
+  the obs-manager level by default — adding 1-D Unoise on a (1, H, W) tensor
+  would scramble the image. Kept as its own group because the 4-D shape is
+  incompatible with the flat 1-D student concat.
+  """
+  return ObservationGroupCfg(
+    terms={
+      "depth_image": ObservationTermCfg(
+        func=envs_mdp.depth_image,
+        params={
+          "sensor_cfg": SceneEntityCfg(sensor_name),
+          "data_type": data_type,
+        },
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
   )
 
 
@@ -190,20 +222,32 @@ def make_teacher_a_obs_groups(
   return actor, history
 
 
-def make_teacher_b_obs_group(
+def make_teacher_b_obs_groups(
   twist_command_name: str = "twist",
   height_scan_sensor_name: str = "terrain_scan",
+  height_grid: tuple[int, int] = (11, 17),
   enable_corruption: bool = True,
-) -> ObservationGroupCfg:
-  """Build the teacher_b actor observation group.
+) -> tuple[ObservationGroupCfg, ObservationGroupCfg]:
+  """Build the (teacher_b, teacher_b_height) observation groups.
 
-  Mirrors ``make_velocity_env_cfg``'s actor terms (286-dim for G1 rough).
-  ``height_scan`` is normalized by the sensor's ``max_distance`` (5.0 in
-  ROUGH default); we leave the scale at 1/5.0 to match training. If the
-  caller's scene uses a different ``max_distance``, override the term's
-  ``scale`` after the fact.
+  Mirrors the current ``Mjlab-Velocity-Rough-Unitree-G1`` actor obs schema
+  used by ``CNNProjModel``:
+
+  * ``teacher_b``         — 1D proprioceptive group (99-dim for G1 rough):
+                            base_lin_vel + base_ang_vel + projected_gravity
+                            + joint_pos + joint_vel + actions + twist_cmd
+  * ``teacher_b_height``  — 2D height-scan group, ``[B, 1, H, W]`` (default
+                            ``11x17`` for the 1.6 m x 1.0 m @ 0.1 m grid),
+                            normalized by ``max_distance=5.0`` to match
+                            training.
+
+  The split mirrors the velocity rough rl_cfg's ``obs_groups={"actor":
+  ("actor", "height"), ...}``; ``CNNProjModel`` reads them as a flat MLP
+  input and a CNN input respectively.
   """
-  terms: dict[str, ObservationTermCfg] = {
+  height_h, height_w = height_grid
+
+  prop_terms: dict[str, ObservationTermCfg] = {
     "base_lin_vel": ObservationTermCfg(
       func=velocity_mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_lin_vel"},
@@ -231,15 +275,27 @@ def make_teacher_b_obs_group(
       func=velocity_mdp.generated_commands,
       params={"command_name": twist_command_name},
     ),
+  }
+  height_terms: dict[str, ObservationTermCfg] = {
     "height_scan": ObservationTermCfg(
-      func=envs_mdp.height_scan,
-      params={"sensor_name": height_scan_sensor_name},
+      func=envs_mdp.height_scan_2d,
+      params={
+        "sensor_name": height_scan_sensor_name,
+        "height": height_h,
+        "width": height_w,
+      },
       noise=Unoise(n_min=-0.1, n_max=0.1),
-      scale=1.0 / 5.0,
+      scale=1.0 / HEIGHT_SCAN_MAX_DISTANCE,
     ),
   }
-  return ObservationGroupCfg(
-    terms=terms,
+  prop_group = ObservationGroupCfg(
+    terms=prop_terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
   )
+  height_group = ObservationGroupCfg(
+    terms=height_terms,
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
+  )
+  return prop_group, height_group

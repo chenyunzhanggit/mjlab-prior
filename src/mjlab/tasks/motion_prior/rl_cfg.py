@@ -64,8 +64,8 @@ class RslRlMotionPriorRunnerCfg(RslRlBaseRunnerCfg):
   """Number of envs for the rough env. Defaults match a typical primary."""
 
   # Frozen teacher checkpoints (paths can use ``~`` for $HOME).
-  teacher_a_policy_path: str = "~/zcy/Teleopit/track.pt"
-  teacher_b_policy_path: str = "~/zcy/mjlab-prior/logs/model_21000.pt"
+  teacher_a_policy_path: str = "~/project/Teleopit/track.pt"
+  teacher_b_policy_path: str = "~/project/mjlab-prior/logs/model_21000.pt"
 
   policy: RslRlMotionPriorPolicyCfg = field(default_factory=RslRlMotionPriorPolicyCfg)
   algorithm: RslRlMotionPriorAlgoCfg = field(default_factory=RslRlMotionPriorAlgoCfg)
@@ -130,8 +130,8 @@ class RslRlMotionPriorVQRunnerCfg(RslRlBaseRunnerCfg):
   secondary_num_envs: int = 1
   """Number of envs for the rough env. Defaults match a typical primary."""
 
-  teacher_a_policy_path: str = "~/zcy/Teleopit/track.pt"
-  teacher_b_policy_path: str = "~/zcy/mjlab-prior/logs/model_21000.pt"
+  teacher_a_policy_path: str = "~/project/Teleopit/track.pt"
+  teacher_b_policy_path: str = "~/project/mjlab-prior/logs/model_21000.pt"
 
   policy: RslRlMotionPriorVQPolicyCfg = field(
     default_factory=RslRlMotionPriorVQPolicyCfg

@@ -257,10 +257,10 @@ class MotionPriorOnPolicyRunner:
     returns a different tuple.
     """
     _, _, _, sa_a_step, _, _ = self.policy.forward_a(
-      _t(obs_a, "student"), _t(obs_a, "teacher_a")
+      _t(obs_a, "student"), _t(obs_a, "teacher_a"), _t(obs_a, "depth")
     )
     _, _, _, sa_b_step, _, _ = self.policy.forward_b(
-      _t(obs_b, "student"), _t(obs_b, "teacher_b")
+      _t(obs_b, "student"), _t(obs_b, "teacher_b"), _t(obs_b, "depth")
     )
     return sa_a_step, sa_b_step
 
@@ -282,6 +282,7 @@ class MotionPriorOnPolicyRunner:
     # Per-step buffers — every entry has shape (n_envs, ...).
     prop_a, prop_b = [], []
     ta_obs, ta_hist, tb_obs = [], [], []
+    depth_a, depth_b = [], []
     ta_act, tb_act = [], []
     prog_a, prog_b = [], []
 
@@ -290,20 +291,26 @@ class MotionPriorOnPolicyRunner:
         # Sample student actions for stepping; gradients are reconstructed
         # in the per-epoch re-forward.
         sa_a_step, sa_b_step = self._policy_step_actions(obs_a, obs_b)
-        # Frozen teacher targets — never need grad.
+        # Frozen teacher targets — never need grad. teacher_b is a CNN+MLP
+        # (mjlab Velocity-Rough G1 actor) that reads BOTH the 1D proprio
+        # group ``teacher_b`` and the 2D height group ``teacher_b_height``.
         teacher_a_action = self.policy.evaluate_a(
           _t(obs_a, "teacher_a"), _t(obs_a, "teacher_a_history")
         )
-        teacher_b_action = self.policy.evaluate_b(_t(obs_b, "teacher_b"))
+        teacher_b_action = self.policy.evaluate_b(
+          _t(obs_b, "teacher_b"), _t(obs_b, "teacher_b_height")
+        )
 
       # Detached input snapshots BEFORE stepping the env.
       prop_a.append(_t(obs_a, "student").detach().clone())
       ta_obs.append(_t(obs_a, "teacher_a").detach().clone())
       ta_hist.append(_t(obs_a, "teacher_a_history").detach().clone())
+      depth_a.append(_t(obs_a, "depth").detach().clone())
       ta_act.append(teacher_a_action.detach().clone())
 
       prop_b.append(_t(obs_b, "student").detach().clone())
       tb_obs.append(_t(obs_b, "teacher_b").detach().clone())
+      depth_b.append(_t(obs_b, "depth").detach().clone())
       tb_act.append(teacher_b_action.detach().clone())
 
       prog_a.append(self.env.episode_length_buf.detach().clone().to(self.device))
@@ -323,9 +330,11 @@ class MotionPriorOnPolicyRunner:
       prop_obs_a=_flat(prop_a),
       teacher_a_obs=_flat(ta_obs),
       teacher_a_history_obs=_flat(ta_hist),
+      depth_a=_flat(depth_a),
       actions_teacher_a=_flat(ta_act),
       prop_obs_b=_flat(prop_b),
       teacher_b_obs=_flat(tb_obs),
+      depth_b=_flat(depth_b),
       actions_teacher_b=_flat(tb_act),
       progress_buf_a=torch.stack(prog_a, dim=1).unsqueeze(-1).float(),
       progress_buf_b=torch.stack(prog_b, dim=1).unsqueeze(-1).float(),
@@ -345,10 +354,10 @@ class MotionPriorOnPolicyRunner:
     Z = self._latent_z_dims
 
     enc_mu_a, enc_lv_a, _, sa_a, mp_mu_a, mp_lv_a = self.policy.forward_a(
-      rollout["prop_obs_a"], rollout["teacher_a_obs"]
+      rollout["prop_obs_a"], rollout["teacher_a_obs"], rollout["depth_a"]
     )
     enc_mu_b, enc_lv_b, _, sa_b, mp_mu_b, mp_lv_b = self.policy.forward_b(
-      rollout["prop_obs_b"], rollout["teacher_b_obs"]
+      rollout["prop_obs_b"], rollout["teacher_b_obs"], rollout["depth_b"]
     )
 
     # Reshape (n_envs*T, Z) → (n_envs, T, Z) for AR(1).
@@ -459,6 +468,7 @@ class MotionPriorOnPolicyRunner:
       "motion_prior": self.policy.motion_prior.state_dict(),
       "mp_mu": self.policy.mp_mu.state_dict(),
       "mp_var": self.policy.mp_var.state_dict(),
+      "depth_cnn": self.policy.depth_cnn.state_dict(),
       "optimizer": self.alg.optimizer.state_dict(),
       "iter": self.current_learning_iteration,
       "infos": infos or {},
@@ -529,14 +539,14 @@ class MotionPriorOnPolicyRunner:
     # is exclusively walking encoder paths).
     deploy_holder: list = []
 
-    def _deploy_call(prop: torch.Tensor) -> torch.Tensor:
+    def _deploy_call(prop: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
       if not deploy_holder:
         m = build_deploy_model(self.policy)
         if device is not None:
           m = m.to(device)
         m.eval()
         deploy_holder.append(m)
-      return deploy_holder[0](prop)
+      return deploy_holder[0](prop, depth)
 
     def _resolve_path(obs_td) -> str:
       if path is not None:
@@ -554,9 +564,10 @@ class MotionPriorOnPolicyRunner:
       with torch.no_grad():
         if chosen == "encoder_a":
           return self.policy.policy_inference_a(prop, _t(obs_td, "teacher_a"))
+        depth = _t(obs_td, "depth")
         if chosen == "encoder_b":
-          return self.policy.policy_inference_b(prop, _t(obs_td, "teacher_b"))
-        return _deploy_call(prop)
+          return self.policy.policy_inference_b(prop, depth)
+        return _deploy_call(prop, depth)
 
     return _policy
 
@@ -578,6 +589,13 @@ class MotionPriorOnPolicyRunner:
     self.policy.motion_prior.load_state_dict(state["motion_prior"], strict=strict)
     self.policy.mp_mu.load_state_dict(state["mp_mu"], strict=strict)
     self.policy.mp_var.load_state_dict(state["mp_var"], strict=strict)
+    if "depth_cnn" in state:
+      self.policy.depth_cnn.load_state_dict(state["depth_cnn"], strict=strict)
+    elif strict:
+      print(
+        "[MotionPrior] ckpt missing 'depth_cnn' — running with randomly "
+        "initialized depth encoder. Use strict=False to silence this warning."
+      )
     if "optimizer" in state and state["optimizer"]:
       self.alg.optimizer.load_state_dict(state["optimizer"])
     self.current_learning_iteration = int(state.get("iter", 0))
@@ -669,10 +687,16 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     ``(student_act, q, enc, mp_code, commit_loss, perplexity)`` — student
     action is the 1st element."""
     sa_a_step, *_ = self.policy.forward_a(
-      _t(obs_a, "student"), _t(obs_a, "teacher_a"), training=False
+      _t(obs_a, "student"),
+      _t(obs_a, "teacher_a"),
+      _t(obs_a, "depth"),
+      training=False,
     )
     sa_b_step, *_ = self.policy.forward_b(
-      _t(obs_b, "student"), _t(obs_b, "teacher_b"), training=False
+      _t(obs_b, "student"),
+      _t(obs_b, "teacher_b"),
+      _t(obs_b, "depth"),
+      training=False,
     )
     return sa_a_step, sa_b_step
 
@@ -688,10 +712,16 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     Z = self._latent_z_dims  # = code_dim for VQ
 
     sa_a, q_a, enc_a, mp_code_a, commit_a, perplexity_a = self.policy.forward_a(
-      rollout["prop_obs_a"], rollout["teacher_a_obs"], training=True
+      rollout["prop_obs_a"],
+      rollout["teacher_a_obs"],
+      rollout["depth_a"],
+      training=True,
     )
     sa_b, q_b, enc_b, mp_code_b, commit_b, perplexity_b = self.policy.forward_b(
-      rollout["prop_obs_b"], rollout["teacher_b_obs"], training=True
+      rollout["prop_obs_b"],
+      rollout["teacher_b_obs"],
+      rollout["depth_b"],
+      training=True,
     )
     # ``training=True`` always produces a real commit_loss tensor.
     assert commit_a is not None and commit_b is not None
@@ -780,6 +810,7 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
       # Quantizer state_dict carries codebook + code_sum + code_count
       # buffers (registered in EMAQuantizer).
       "quantizer": self.policy.quantizer.state_dict(),
+      "depth_cnn": self.policy.depth_cnn.state_dict(),
       "optimizer": self.alg.optimizer.state_dict(),
       "iter": self.current_learning_iteration,
       "infos": infos or {},
@@ -810,6 +841,13 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     self.policy.decoder.load_state_dict(state["decoder"], strict=strict)
     self.policy.motion_prior.load_state_dict(state["motion_prior"], strict=strict)
     self.policy.quantizer.load_state_dict(state["quantizer"], strict=strict)
+    if "depth_cnn" in state:
+      self.policy.depth_cnn.load_state_dict(state["depth_cnn"], strict=strict)
+    elif strict:
+      print(
+        "[MotionPriorVQ] ckpt missing 'depth_cnn' — running with randomly "
+        "initialized depth encoder. Use strict=False to silence this warning."
+      )
     if "optimizer" in state and state["optimizer"]:
       self.alg.optimizer.load_state_dict(state["optimizer"])
     self.current_learning_iteration = int(state.get("iter", 0))

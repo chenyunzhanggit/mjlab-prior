@@ -144,3 +144,44 @@ def height_scan(
 
   miss_mask = data.distances < 0
   return torch.where(miss_mask, torch.full_like(heights, miss_value), heights)
+
+
+def height_scan_2d(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  height: int,
+  width: int,
+  offset: float = 0.0,
+  miss_value: float | None = None,
+) -> torch.Tensor:
+  """Height scan reshaped to ``[B, 1, H, W]`` for CNN encoders.
+
+  Thin wrapper around :func:`height_scan` that reshapes the flat ``[B, N]``
+  output into a single-channel 2D image. ``height * width`` must equal the
+  sensor's total ray count.
+  """
+  flat = height_scan(env, sensor_name, offset=offset, miss_value=miss_value)
+  B, N = flat.shape
+  assert N == height * width, (
+    f"height_scan_2d: H*W ({height}*{width}={height * width}) != sensor ray count ({N})"
+  )
+  return flat.view(B, 1, height, width)
+
+
+_DEPTH_IMAGE_DEFAULT_SENSOR_CFG = SceneEntityCfg("camera")
+
+
+def depth_image(
+  env: ManagerBasedRlEnv,
+  sensor_cfg: SceneEntityCfg = _DEPTH_IMAGE_DEFAULT_SENSOR_CFG,
+  data_type: str = "distance_to_image_plane_noised",
+) -> torch.Tensor:
+  """Depth image from a ``NoisyGroupedRayCasterCamera`` sensor.
+
+  Returns shape ``(N, C, H, W)`` where ``C=1`` for single-frame depth.
+  ``data_type`` should normally be ``distance_to_image_plane_noised``
+  (already normalized + cropped by the sensor's noise pipeline).
+  """
+  sensor = env.scene.sensors[sensor_cfg.name]
+  images = sensor.data.output[data_type].clone()  # (N, H, W, C)
+  return images.permute(0, 3, 1, 2)  # (N, C, H, W)

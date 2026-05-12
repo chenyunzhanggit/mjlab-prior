@@ -5,7 +5,7 @@ Spins up the real velocity-rough env at ``num_envs=32``, builds the
 runs a handful of PPO iterations. Skipped automatically when:
 
   * no CUDA device,
-  * no motion_prior ckpt under ``~/zcy/mjlab-prior/logs/...``.
+  * no motion_prior ckpt under ``~/project/mjlab-prior/logs/...``.
 
 Marked ``slow`` so ``make test-fast`` ignores it.
 """
@@ -22,7 +22,7 @@ import torch
 
 def _find_motion_prior_ckpt() -> Path | None:
   pattern = str(
-    Path("~/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior/*/model_*.pt").expanduser()
+    Path("~/project/mjlab-prior/logs/rsl_rl/g1_motion_prior/*/model_*.pt").expanduser()
   )
   matches = sorted(glob.glob(pattern))
   return Path(matches[-1]) if matches else None
@@ -33,7 +33,7 @@ def _requires_e2e() -> Path:
     pytest.skip("downstream e2e needs CUDA")
   ckpt = _find_motion_prior_ckpt()
   if ckpt is None:
-    pytest.skip("no motion_prior ckpt under ~/zcy/mjlab-prior/logs/...")
+    pytest.skip("no motion_prior ckpt under ~/project/mjlab-prior/logs/...")
   return ckpt
 
 

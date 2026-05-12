@@ -5,14 +5,17 @@ log_dir, device)``), but does not inherit ``rsl_rl.runners.OnPolicyRunner``
 because rsl_rl 5.2's PPO expects an ``MLPModel`` actor — see
 ``DownStreamPPO`` module docstring.
 
-env contract: a single ``RslRlVecEnvWrapper`` that exposes three obs
+env contract: a single ``RslRlVecEnvWrapper`` that exposes four obs
 groups in its TensorDict:
 
   * ``policy``           — actor input (task command + proprio history)
   * ``motion_prior_obs`` — frozen ``motion_prior`` MLP input (proprio only,
                             schema MUST match motion_prior training-time
                             student obs)
-  * ``critic``           — privileged obs (policy + base_lin_vel etc.)
+  * ``depth``            — frozen depth-CNN input, ``[B, 1, H, W]``
+  * ``critic``           — privileged obs (policy + base_lin_vel +
+                            scandot — kept as a privileged signal even
+                            though the actor reads depth instead)
 
 Save / load only persists the **trainable** submodules (actor / critic /
 ``std`` parameter) plus the optimizer state. The frozen backbone reloads
@@ -62,20 +65,10 @@ class DownStreamOnPolicyRunner:
 
     self.env = env
 
-    # ---- Resolve obs dims from the env's TensorDict -------------------- #
-    obs0 = self.env.get_observations()
-    policy_obs = _t(obs0, "policy")
-    prop_obs = _t(obs0, "motion_prior_obs")
-    critic_obs = _t(obs0, "critic")
-    self._policy_obs_shape = tuple(policy_obs.shape[1:])
-    self._prop_obs_shape = tuple(prop_obs.shape[1:])
-    self._critic_obs_shape = tuple(critic_obs.shape[1:])
-
-    # ---- Build policy ---------------------------------------------------- #
-    # play.py doesn't expose --agent.* flags, so env var is the only way to
-    # inject the motion-prior ckpt path into a play-time runner. Train.py
-    # users still pass --agent.motion-prior-ckpt-path normally; the env var
-    # is just a fallback when the cfg field is empty.
+    # ---- Validate motion_prior ckpt path BEFORE poking the env -----------#
+    # We resolve this first so callers without a ckpt get a clear error
+    # without paying for an env.get_observations() round-trip (and without
+    # being blocked by missing obs groups in stub envs).
     motion_prior_ckpt = train_cfg.get("motion_prior_ckpt_path") or os.environ.get(
       "MJLAB_MOTION_PRIOR_CKPT", ""
     )
@@ -85,6 +78,18 @@ class DownStreamOnPolicyRunner:
         "--agent.motion-prior-ckpt-path on the train CLI, or the "
         "MJLAB_MOTION_PRIOR_CKPT environment variable for play."
       )
+
+    # ---- Resolve obs dims from the env's TensorDict -------------------- #
+    obs0 = self.env.get_observations()
+    policy_obs = _t(obs0, "policy")
+    prop_obs = _t(obs0, "motion_prior_obs")
+    critic_obs = _t(obs0, "critic")
+    depth_obs = _t(obs0, "depth")
+    self._policy_obs_shape = tuple(policy_obs.shape[1:])
+    self._prop_obs_shape = tuple(prop_obs.shape[1:])
+    self._critic_obs_shape = tuple(critic_obs.shape[1:])
+    self._depth_obs_shape = tuple(depth_obs.shape[1:])
+
     policy_cfg = train_cfg.get("policy", {})
 
     self.policy = self._build_policy(
@@ -92,6 +97,7 @@ class DownStreamOnPolicyRunner:
       num_actions=int(self.env.num_actions),
       num_privileged_obs=int(critic_obs.shape[-1]),
       prop_obs_dim=int(prop_obs.shape[-1]),
+      depth_shape=self._depth_obs_shape,
       motion_prior_ckpt_path=motion_prior_ckpt,
       policy_cfg=policy_cfg,
       device=device,
@@ -152,6 +158,7 @@ class DownStreamOnPolicyRunner:
     num_actions: int,
     num_privileged_obs: int,
     prop_obs_dim: int,
+    depth_shape: tuple[int, ...],
     motion_prior_ckpt_path: str,
     policy_cfg: dict,
     device: str | torch.device,
@@ -173,6 +180,8 @@ class DownStreamOnPolicyRunner:
       critic_hidden_dims=tuple(policy_cfg.get("critic_hidden_dims", (512, 256, 128))),
       activation=str(policy_cfg.get("activation", "elu")),
       init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
+      depth_shape=tuple(depth_shape),  # type: ignore[arg-type]
+      depth_latent_dim=int(policy_cfg.get("depth_latent_dim", 128)),
       device=device,
     )
 
@@ -225,8 +234,9 @@ class DownStreamOnPolicyRunner:
       policy_obs = _t(obs, "policy")
       prop_obs = _t(obs, "motion_prior_obs")
       critic_obs = _t(obs, "critic")
+      depth_obs = _t(obs, "depth")
 
-      action = self.alg.act(policy_obs, prop_obs, critic_obs)
+      action = self.alg.act(policy_obs, prop_obs, critic_obs, depth_obs)
       obs, rew, dones, extras = self.env.step(action)
       self.alg.process_env_step(rew, dones)
       self._track_episode_stats(rew, dones)
@@ -402,7 +412,9 @@ class DownStreamOnPolicyRunner:
     def _policy(obs_td: TensorDict) -> torch.Tensor:
       with torch.no_grad():
         return self.policy.policy_inference(
-          _t(obs_td, "policy"), _t(obs_td, "motion_prior_obs")
+          _t(obs_td, "policy"),
+          _t(obs_td, "motion_prior_obs"),
+          _t(obs_td, "depth"),
         )
 
     return _policy
@@ -428,6 +440,7 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
     num_actions: int,
     num_privileged_obs: int,
     prop_obs_dim: int,
+    depth_shape: tuple[int, ...],
     motion_prior_ckpt_path: str,
     policy_cfg: dict,
     device: str | torch.device,
@@ -454,5 +467,7 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
       init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
       use_lab=bool(policy_cfg.get("use_lab", True)),
       lab_lambda=float(policy_cfg.get("lab_lambda", 3.0)),
+      depth_shape=tuple(depth_shape),  # type: ignore[arg-type]
+      depth_latent_dim=int(policy_cfg.get("depth_latent_dim", 128)),
       device=device,
     )

@@ -1,14 +1,21 @@
 """ONNX deploy wrappers for the motion-prior student.
 
 At deployment the robot has no ``teacher_obs`` and no motion-tracking
-command — only proprioception. So the exported model bundles **Path 3**
-of the trained policy (per prior.md task #13)::
+command — only proprioception **and a depth image**. So the exported
+model bundles **Path 3** of the trained policy::
 
-  prop_obs ──► motion_prior_head ──► z ──► decoder ──► action
+  (prop_obs, depth)
+       │
+       │     depth_latent = depth_cnn(depth)
+       │     h = motion_prior([prop, depth_latent])
+       ▼
+       z (= mp_mu(h) for VAE / h directly for VQ)
+       │
+       ▼     decoder([prop, z]) ──► action
 
-For VAE policies that means ``motion_prior MLP → mp_mu Linear → decoder``
-since ``motion_prior_inference`` returns ``mp_mu``. For VQ policies the
-motion_prior MLP already outputs ``code_dim`` directly.
+For VAE policies the prior head adds an ``mp_mu`` Linear after the MLP
+(``motion_prior_inference`` returns ``mp_mu``). For VQ policies the MLP
+outputs ``code_dim`` directly. Both share the same Phase-2 ``depth_cnn``.
 
 Frozen teachers and per-teacher encoders are intentionally **not**
 exported; they would require obs the deployment environment does not
@@ -38,48 +45,60 @@ class MotionPriorVAEDeployModel(nn.Module):
   """Deployable Path 3 head for the VAE motion-prior student."""
 
   is_recurrent: bool = False
-  input_names = ("prop_obs",)
+  input_names = ("prop_obs", "depth")
   output_names = ("actions",)
 
   def __init__(self, policy: MotionPriorPolicy) -> None:
     super().__init__()
+    self.depth_cnn = copy.deepcopy(policy.depth_cnn)
     self.motion_prior = copy.deepcopy(policy.motion_prior)
     self.mp_mu = copy.deepcopy(policy.mp_mu)
     self.decoder = copy.deepcopy(policy.decoder)
     self.input_size = policy.prop_obs_dim
+    self.depth_shape = policy.depth_shape
     self.output_size = policy.num_actions
     self.eval()
 
-  def forward(self, prop_obs: torch.Tensor) -> torch.Tensor:
-    h = self.motion_prior(prop_obs)
+  def forward(self, prop_obs: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
+    depth_latent = self.depth_cnn(depth)
+    h = self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
     z = self.mp_mu(h)  # μ_mp from the VAE prior; no sampling at deploy
     return self.decoder(torch.cat([prop_obs, z], dim=-1))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor]:
-    return (torch.zeros(1, self.input_size),)
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+      torch.zeros(1, self.input_size),
+      torch.zeros(1, *self.depth_shape),
+    )
 
 
 class MotionPriorVQDeployModel(nn.Module):
   """Deployable Path 3 head for the VQ-VAE motion-prior student."""
 
   is_recurrent: bool = False
-  input_names = ("prop_obs",)
+  input_names = ("prop_obs", "depth")
   output_names = ("actions",)
 
   def __init__(self, policy: MotionPriorVQPolicy) -> None:
     super().__init__()
+    self.depth_cnn = copy.deepcopy(policy.depth_cnn)
     self.motion_prior = copy.deepcopy(policy.motion_prior)
     self.decoder = copy.deepcopy(policy.decoder)
     self.input_size = policy.prop_obs_dim
+    self.depth_shape = policy.depth_shape
     self.output_size = policy.num_actions
     self.eval()
 
-  def forward(self, prop_obs: torch.Tensor) -> torch.Tensor:
-    z = self.motion_prior(prop_obs)  # already code_dim
+  def forward(self, prop_obs: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
+    depth_latent = self.depth_cnn(depth)
+    z = self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))  # code_dim
     return self.decoder(torch.cat([prop_obs, z], dim=-1))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor]:
-    return (torch.zeros(1, self.input_size),)
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+      torch.zeros(1, self.input_size),
+      torch.zeros(1, *self.depth_shape),
+    )
 
 
 def build_deploy_model(
@@ -99,7 +118,10 @@ def export_motion_prior_to_onnx(
   *,
   verbose: bool = False,
 ) -> None:
-  """Export the deployable Path 3 student to ONNX (input ``prop_obs`` only)."""
+  """Export the deployable Path 3 student to ONNX.
+
+  Exported inputs: ``prop_obs`` (1D) and ``depth`` (4D, [B, C, H, W]).
+  """
   output_path = Path(output_path)
   os.makedirs(output_path.parent, exist_ok=True)
   model = build_deploy_model(policy).to("cpu")
@@ -113,7 +135,11 @@ def export_motion_prior_to_onnx(
     verbose=verbose,
     input_names=list(model.input_names),  # type: ignore[arg-type]
     output_names=list(model.output_names),  # type: ignore[arg-type]
-    dynamic_axes={"prop_obs": {0: "batch"}, "actions": {0: "batch"}},
+    dynamic_axes={
+      "prop_obs": {0: "batch"},
+      "depth": {0: "batch"},
+      "actions": {0: "batch"},
+    },
     dynamo=False,
   )
 
@@ -126,8 +152,9 @@ def export_motion_prior_to_onnx(
 class DownStreamCombinedDeployModel(nn.Module):
   """Full ``DownStreamPolicy`` deploy chain in one ONNX file.
 
-    (prop_obs, policy_obs) ──►
-        z_prior_mu = mp_mu(motion_prior(prop_obs))
+    (prop_obs, depth, policy_obs) ──►
+        depth_latent = depth_cnn(depth)
+        z_prior_mu = mp_mu(motion_prior([prop_obs, depth_latent]))
         raw_action = actor(policy_obs)
         z = z_prior_mu + raw_action
         action = decoder(cat([prop_obs, z]))
@@ -137,95 +164,122 @@ class DownStreamCombinedDeployModel(nn.Module):
   """
 
   is_recurrent: bool = False
-  input_names = ("prop_obs", "policy_obs")
+  input_names = ("prop_obs", "depth", "policy_obs")
   output_names = ("actions",)
 
   def __init__(self, policy: DownStreamPolicy) -> None:
     super().__init__()
+    self.depth_cnn = copy.deepcopy(policy.depth_cnn)
     self.motion_prior = copy.deepcopy(policy.motion_prior)
     self.mp_mu = copy.deepcopy(policy.mp_mu)
     self.decoder = copy.deepcopy(policy.decoder)
     self.actor = copy.deepcopy(policy.actor)
     self.prop_obs_dim = policy.prop_obs_dim
+    self.depth_shape = policy.depth_shape
     self.num_obs = policy.num_obs
     self.num_actions = policy.num_actions
     self.eval()
 
-  def forward(self, prop_obs: torch.Tensor, policy_obs: torch.Tensor) -> torch.Tensor:
-    z_prior_mu = self.mp_mu(self.motion_prior(prop_obs))
-    raw_action = self.actor(policy_obs)
+  def forward(
+    self,
+    prop_obs: torch.Tensor,
+    depth: torch.Tensor,
+    policy_obs: torch.Tensor,
+  ) -> torch.Tensor:
+    depth_latent = self.depth_cnn(depth)
+    z_prior_mu = self.mp_mu(
+      self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
+    )
+    raw_action = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
     z = z_prior_mu + raw_action
     return self.decoder(torch.cat([prop_obs, z], dim=-1))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return (
       torch.zeros(1, self.prop_obs_dim),
+      torch.zeros(1, *self.depth_shape),
       torch.zeros(1, self.num_obs),
     )
 
 
 class DownStreamActorDeployModel(nn.Module):
-  """Trainable-only path: ``policy_obs → raw_latent``.
+  """Trainable-only path: ``[policy_obs, depth_latent] → raw_latent``.
 
   Provided for users who want to keep the frozen backbone separate (e.g.
   share one motion_prior backbone across multiple downstream actors). The
-  on-board controller would then run this actor + the existing motion_prior
-  pipeline + a thin "add residual & decode" layer in C++/runtime. For most
+  caller is responsible for running ``depth_cnn`` externally and supplying
+  the resulting ``depth_latent`` here — the actor now reads it alongside
+  ``policy_obs`` so it can condition the residual on terrain. For most
   cases use ``DownStreamCombinedDeployModel`` instead.
   """
 
   is_recurrent: bool = False
-  input_names = ("policy_obs",)
+  input_names = ("policy_obs", "depth_latent")
   output_names = ("raw_action",)
 
   def __init__(self, policy: DownStreamPolicy | DownStreamVQPolicy) -> None:
     super().__init__()
     self.actor = copy.deepcopy(policy.actor)
     self.num_obs = policy.num_obs
+    self.depth_latent_dim = policy.depth_latent_dim
     self.latent_dim = policy.latent_dim
     self.eval()
 
-  def forward(self, policy_obs: torch.Tensor) -> torch.Tensor:
-    return self.actor(policy_obs)
+  def forward(
+    self, policy_obs: torch.Tensor, depth_latent: torch.Tensor
+  ) -> torch.Tensor:
+    return self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor]:
-    return (torch.zeros(1, self.num_obs),)
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+      torch.zeros(1, self.num_obs),
+      torch.zeros(1, self.depth_latent_dim),
+    )
 
 
 class DownStreamVQCombinedDeployModel(nn.Module):
   """Full ``DownStreamVQPolicy`` deploy chain in one ONNX file.
 
-    (prop_obs, policy_obs) ──►
-        prior_latent = motion_prior(prop_obs)            # frozen
-        raw_action   = actor(policy_obs)                 # trainable
-        z = prior_latent + λ·tanh(raw_action)            # LAB on by default
-        q = quantizer.dequantize(quantizer.quantize(z))  # frozen codebook lookup
-        action = decoder(cat([prop_obs, q]))             # frozen
+    (prop_obs, depth, policy_obs) ──►
+        depth_latent = depth_cnn(depth)
+        prior_latent = motion_prior([prop_obs, depth_latent])  # frozen
+        raw_action   = actor(policy_obs)                       # trainable
+        z = prior_latent + λ·tanh(raw_action)                  # LAB on by default
+        q = quantizer.dequantize(quantizer.quantize(z))        # frozen codebook
+        action = decoder(cat([prop_obs, q]))                   # frozen
 
   The codebook nearest-neighbor lookup uses ``argmin`` which exports cleanly
   to ONNX opset 18. EMA updates are off here (we never update at deploy).
   """
 
   is_recurrent: bool = False
-  input_names = ("prop_obs", "policy_obs")
+  input_names = ("prop_obs", "depth", "policy_obs")
   output_names = ("actions",)
 
   def __init__(self, policy: DownStreamVQPolicy) -> None:
     super().__init__()
+    self.depth_cnn = copy.deepcopy(policy.depth_cnn)
     self.motion_prior = copy.deepcopy(policy.motion_prior)
     self.quantizer = copy.deepcopy(policy.quantizer)
     self.decoder = copy.deepcopy(policy.decoder)
     self.actor = copy.deepcopy(policy.actor)
     self.prop_obs_dim = policy.prop_obs_dim
+    self.depth_shape = policy.depth_shape
     self.num_obs = policy.num_obs
     self.num_actions = policy.num_actions
     self.use_lab = policy.use_lab
     self.lab_lambda = policy.lab_lambda
     self.eval()
 
-  def forward(self, prop_obs: torch.Tensor, policy_obs: torch.Tensor) -> torch.Tensor:
-    prior_latent = self.motion_prior(prop_obs)
-    raw_action = self.actor(policy_obs)
+  def forward(
+    self,
+    prop_obs: torch.Tensor,
+    depth: torch.Tensor,
+    policy_obs: torch.Tensor,
+  ) -> torch.Tensor:
+    depth_latent = self.depth_cnn(depth)
+    prior_latent = self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
+    raw_action = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
     if self.use_lab:
       z = prior_latent + self.lab_lambda * torch.tanh(raw_action)
     else:
@@ -234,9 +288,10 @@ class DownStreamVQCombinedDeployModel(nn.Module):
     q = self.quantizer.dequantize(code_idx)
     return self.decoder(torch.cat([prop_obs, q], dim=-1))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return (
       torch.zeros(1, self.prop_obs_dim),
+      torch.zeros(1, *self.depth_shape),
       torch.zeros(1, self.num_obs),
     )
 
@@ -264,12 +319,17 @@ def export_downstream_to_onnx(
       model = DownStreamCombinedDeployModel(policy)
     dynamic_axes = {
       "prop_obs": {0: "batch"},
+      "depth": {0: "batch"},
       "policy_obs": {0: "batch"},
       "actions": {0: "batch"},
     }
   elif mode == "actor":
     model = DownStreamActorDeployModel(policy)
-    dynamic_axes = {"policy_obs": {0: "batch"}, "raw_action": {0: "batch"}}
+    dynamic_axes = {
+      "policy_obs": {0: "batch"},
+      "depth_latent": {0: "batch"},
+      "raw_action": {0: "batch"},
+    }
   else:
     raise ValueError(f"Unknown export mode: {mode!r}; use 'combined' or 'actor'.")
 

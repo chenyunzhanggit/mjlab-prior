@@ -67,6 +67,60 @@ class PlayConfig:
   _demo_mode: tyro.conf.Suppress[bool] = False
 
 
+def _wrap_with_depth_viz(policy_fn, *, window_name: str = "depth_image"):
+  """Wrap an inference policy to also display the env's depth image.
+
+  The returned callable forwards ``obs_td`` to ``policy_fn`` unchanged and
+  additionally pulls the ``"depth"`` group (if present) from the obs dict
+  and shows the first env's frame in an OpenCV window. Pass-through is
+  silent if the env doesn't have a depth group or if OpenCV import fails,
+  so this is safe to enable globally.
+
+  Triggered by ``MJLAB_PLAY_SHOW_DEPTH=1`` in :func:`run_play`.
+  """
+  try:
+    import cv2  # type: ignore[import-not-found]
+  except ImportError:
+    print(
+      "[play] MJLAB_PLAY_SHOW_DEPTH set but OpenCV is not installed; "
+      "skipping depth visualization."
+    )
+    return policy_fn
+
+  import numpy as np
+
+  cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+  scale_up = int(os.environ.get("MJLAB_PLAY_DEPTH_SCALE", "8"))
+
+  def _wrapped(obs_td):
+    # The 4D depth tensor lives under the "depth" obs group when the env
+    # is in depth mode (Phase 1+); fall back silently otherwise so this
+    # wrapper works with any task.
+    try:
+      depth = obs_td["depth"]
+    except (KeyError, IndexError):
+      return policy_fn(obs_td)
+
+    if depth is not None and depth.ndim == 4 and depth.shape[1] >= 1:
+      # depth: (N, C, H, W). Show env 0, channel 0. Values are already
+      # normalized to [0, 1] by the camera noise pipeline (dropout fill
+      # is -1; we clip for display).
+      img = depth[0, 0].detach().cpu().float().numpy()
+      img = np.clip(img, 0.0, 1.0)
+      img = (img * 255.0).astype(np.uint8)
+      if scale_up > 1:
+        img = cv2.resize(
+          img,
+          (img.shape[1] * scale_up, img.shape[0] * scale_up),
+          interpolation=cv2.INTER_NEAREST,
+        )
+      cv2.imshow(window_name, img)
+      cv2.waitKey(1)
+    return policy_fn(obs_td)
+
+  return _wrapped
+
+
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
 
@@ -243,6 +297,18 @@ def run_play(task_id: str, cfg: PlayConfig):
     )
     policy = runner.get_inference_policy(device=device)
 
+  # Optional depth-image visualization. Enabled by env var to keep play
+  # cheap by default and to avoid pulling a cv2 window when the env doesn't
+  # produce depth (e.g. velocity-rough teacher tasks without a camera).
+  _show_depth = os.environ.get("MJLAB_PLAY_SHOW_DEPTH", "").lower() in (
+    "1",
+    "true",
+    "yes",
+  )
+  if _show_depth:
+    print("[play] MJLAB_PLAY_SHOW_DEPTH=1 -> showing depth image window")
+    policy = _wrap_with_depth_viz(policy)  # type: ignore[assignment]
+
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
   if TRAINED_MODE and resume_path is not None:
@@ -255,7 +321,10 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _ckpt_runner.get_inference_policy(device=device)
+      new_policy = _ckpt_runner.get_inference_policy(device=device)
+      if _show_depth:
+        new_policy = _wrap_with_depth_viz(new_policy)
+      return new_policy
 
     if cfg.wandb_run_path is None:
       ckpt_dir = resume_path.parent

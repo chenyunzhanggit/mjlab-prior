@@ -49,6 +49,8 @@ dependencies = [
   "tensorboard>=2.20.0",
   "onnxscript>=0.5.4",
   "wandb>=0.22.3",
+  "scikit-learn>=1.7.2",
+  "opencv-python>=4.13.0.92",
 ]
 
 [project.urls]

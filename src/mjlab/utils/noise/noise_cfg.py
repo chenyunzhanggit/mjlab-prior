@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -144,3 +145,91 @@ class NoiseModelWithAdditiveBiasCfg(
       raise ValueError(
         "bias_noise_cfg must be specified for NoiseModelWithAdditiveBiasCfg"
       )
+
+
+##
+# Image noise models.
+##
+
+
+@dataclass(kw_only=True)
+class ImageNoiseCfg:
+  """Base configuration for image noise/transform terms."""
+
+  func: (
+    Callable[
+      [torch.Tensor, "ImageNoiseCfg", torch.Tensor | Sequence[int]], torch.Tensor
+    ]
+    | type[noise_model.ImageNoiseModel]
+  ) = noise_model.ImageNoiseModel
+  """Callable that applies the transform. Signature: (data, cfg, env_ids) -> data."""
+
+  device: str | torch.device = "cpu"
+
+
+@dataclass(kw_only=True)
+class DepthNormalizationCfg(ImageNoiseCfg):
+  """Clip depth to a range and optionally normalize to [0, 1]."""
+
+  depth_range: tuple[float, float] = (0.0, 10.0)
+  normalize: bool = True
+  output_range: tuple[float, float] = (0.0, 1.0)
+  func: Callable[
+    [torch.Tensor, "DepthNormalizationCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.depth_normalization
+
+
+@dataclass(kw_only=True)
+class CropAndResizeCfg(ImageNoiseCfg):
+  """Crop border pixels and resize the image."""
+
+  crop_region: tuple[int, int, int, int] = (0, 0, 0, 0)
+  """(top, bottom, left, right) pixels to crop from each edge."""
+
+  resize_shape: tuple[int, int] | None = None
+  """Output (height, width) after resize. None = no resize."""
+
+  func: Callable[
+    [torch.Tensor, "CropAndResizeCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.crop_and_resize
+
+
+@dataclass(kw_only=True)
+class DepthDistanceGaussianNoiseCfg(ImageNoiseCfg):
+  """Distance-dependent Gaussian noise: sigma = depth_std + depth * depth_std_multiplier.
+
+  Applied in meter space (before normalization). Matches real depth camera
+  behavior where noise grows with distance:
+    sigma = 0.005 + 0.01 x d  ->  at 2 m: sigma ~= 0.025 m
+  """
+
+  depth_std: float = 0.005
+  """Base noise std (meters). Independent of distance."""
+
+  depth_std_multiplier: float = 0.01
+  """Per-meter noise growth. Total std = depth_std + depth * depth_std_multiplier."""
+
+  func: Callable[
+    [torch.Tensor, "DepthDistanceGaussianNoiseCfg", torch.Tensor | Sequence[int]],
+    torch.Tensor,
+  ] = noise_model.depth_distance_gaussian_noise
+
+
+@dataclass(kw_only=True)
+class DepthDropoutCfg(ImageNoiseCfg):
+  """Randomly invalidate depth pixels to simulate missing returns.
+
+  Each pixel is independently dropped with probability ``drop_prob``. Applied
+  after normalization; dropped pixels receive ``fill_value`` (default -1.0)
+  which lies outside [0, 1] so the policy can distinguish them from real returns.
+  """
+
+  drop_prob: float = 0.01
+  """Probability in [0, 1) that a pixel is dropped."""
+
+  fill_value: float = -1.0
+  """Value for dropped pixels. -1.0 is outside normalized [0, 1] range."""
+
+  func: Callable[
+    [torch.Tensor, "DepthDropoutCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.depth_dropout

@@ -18,5 +18,10 @@ rough locomotion latent + mp + prop_obs: play_motion_prior_vq_rough.sh
 only mp + prop_obs: play_motion_prior_vq_deploy.sh (change the task in this bash to change the FLAT or ROUGH)
 
 DownStream Task:
+Train:
 VAE: run_downstream_velocity.sh
 VQ-VAE: run_downstream_velocity_vq.sh
+
+Play:
+VAE: play_downstream_velocity.sh
+VQ-VAE: play_downstream_vq_velocity.sh

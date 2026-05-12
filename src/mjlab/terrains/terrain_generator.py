@@ -72,6 +72,13 @@ class SubTerrainCfg(abc.ABC):
   """Width and length of the terrain patch, in meters."""
   flat_patch_sampling: dict[str, FlatPatchSamplingCfg] | None = None
   """Named flat-patch sampling configurations, or None to disable."""
+  terrain_class: int = 0
+  """Coarse class label for this sub-terrain.
+
+  Used to switch downstream behavior per terrain type (e.g. force forward-only
+  velocity commands and skip yaw randomization on hard terrains). Class IDs are
+  application-defined; a common convention is 0=easy/flat, 1=medium/slope,
+  2=hard/stairs."""
 
   @abc.abstractmethod
   def function(
@@ -170,6 +177,8 @@ class TerrainGenerator:
     self.np_rng = np.random.default_rng(seed)
 
     self.terrain_origins = np.zeros((self.cfg.num_rows, self._num_cols, 3))
+    # terrain_class label for every (row, col) patch. Filled during compile().
+    self.terrain_classes = np.zeros((self.cfg.num_rows, self._num_cols), dtype=np.int64)
 
     # Pre-allocate flat patch storage by scanning all sub-terrain configs.
     self.flat_patches: dict[str, np.ndarray] = {}
@@ -252,6 +261,9 @@ class TerrainGenerator:
 
       # Store the spawn origin for this terrain.
       self.terrain_origins[sub_row, sub_col] = spawn_origin
+      self.terrain_classes[sub_row, sub_col] = sub_terrains_cfgs[
+        sub_index
+      ].terrain_class
 
   def _generate_curriculum_terrains(self, spec: mujoco.MjSpec) -> None:
     # One column per terrain type — proportion is only for spawning.
@@ -272,6 +284,9 @@ class TerrainGenerator:
           sub_col,
         )
         self.terrain_origins[sub_row, sub_col] = spawn_origin
+        self.terrain_classes[sub_row, sub_col] = sub_terrains_cfgs[
+          sub_col
+        ].terrain_class
 
   def _get_sub_terrain_position(self, row: int, col: int) -> np.ndarray:
     """Get the world position for a sub-terrain at the given grid indices.

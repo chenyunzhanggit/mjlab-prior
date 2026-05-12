@@ -52,8 +52,8 @@ rough env ──► obs.student        (372)  ─┐                    │
 
 | Asset | Path | Note |
 |---|---|---|
-| teacher_a checkpoint | `~/zcy/Teleopit/track.pt` | Teleopit `TemporalCNN`, 27 tensors, 166-d obs + 10-frame history |
-| teacher_b checkpoint | `~/zcy/mjlab-prior/logs/model_21000.pt` | mjlab velocity-rough actor, plain MLP, 286-d obs |
+| teacher_a checkpoint | `~/project/Teleopit/track.pt` | Teleopit `TemporalCNN`, 27 tensors, 166-d obs + 10-frame history |
+| teacher_b checkpoint | `~/project/mjlab-prior/logs/model_21000.pt` | mjlab velocity-rough actor, plain MLP, 286-d obs |
 | motion file | `~/zcy/Teleopit/data/one_motion_for_debug.npz` (or your own `.npz` / W&B registry) | Drives the flat env's `MotionCommand` |
 
 ---

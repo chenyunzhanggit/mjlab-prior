@@ -28,7 +28,7 @@ B = 4
 def _find_motion_prior_ckpt() -> Path | None:
   """Pick the most recent local motion-prior ckpt, if one exists."""
   pattern = str(
-    Path("~/zcy/mjlab-prior/logs/rsl_rl/g1_motion_prior/*/model_*.pt").expanduser()
+    Path("~/project/mjlab-prior/logs/rsl_rl/g1_motion_prior/*/model_*.pt").expanduser()
   )
   matches = sorted(glob.glob(pattern))
   return Path(matches[-1]) if matches else None
@@ -38,7 +38,7 @@ def _find_motion_prior_ckpt() -> Path | None:
 def ckpt_path() -> Path:
   p = _find_motion_prior_ckpt()
   if p is None:
-    pytest.skip("no motion_prior ckpt under ~/zcy/mjlab-prior/logs/...")
+    pytest.skip("no motion_prior ckpt under ~/project/mjlab-prior/logs/...")
   return p
 
 

@@ -235,6 +235,15 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         },
       },
     ),
+    "forward_only_on_stairs": EventTermCfg(
+      func=mdp.force_forward_only_command_for_terrain_class,
+      mode="step",
+      params={
+        "command_name": "twist",
+        "terrain_classes": (2,),
+        "min_lin_vel_x": 0.2,
+      },
+    ),
     "foot_friction": EventTermCfg(
       mode="startup",
       func=dr.geom_friction,
@@ -315,7 +324,10 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       params={"sensor_name": "robot/root_angmom"},
     ),
     "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
+    # "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-5e-7),
+    # "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-1e-3),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+    # "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.05),
     "air_time": RewardTermCfg(
       func=mdp.feet_air_time,
       weight=0.0,  # Override per-robot.
@@ -400,9 +412,19 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "command_name": "twist",
         "velocity_stages": [
-          {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
-          {"step": 5000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
-          {"step": 10000 * 24, "lin_vel_x": (-2.0, 3.0)},
+          {
+            "step": 0,
+            "lin_vel_x": (-0.5, 0.5),
+            "lin_vel_y": (-0.5, 0.5),
+            "ang_vel_z": (-0.5, 0.5),
+          },
+          {
+            "step": 5000 * 24,
+            "lin_vel_x": (-0.7, 0.7),
+            "lin_vel_y": (-0.7, 0.7),
+            "ang_vel_z": (-0.7, 0.7),
+          },
+          # {"step": 10000 * 24, "lin_vel_x": (-0.7, )},
         ],
       },
     ),

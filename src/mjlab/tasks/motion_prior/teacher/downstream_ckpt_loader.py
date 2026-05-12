@@ -20,6 +20,7 @@ Checkpoint layout (see ``MotionPriorOnPolicyRunner.save``):
         "motion_prior": state_dict,   ← needed
         "mp_mu":        state_dict,   ← needed (VAE)
         "mp_var":       state_dict,
+        "depth_cnn":    state_dict,   ← needed (depth migration)
         "optimizer":    state_dict,
         "iter":         int,
         "infos":        dict,
@@ -27,9 +28,10 @@ Checkpoint layout (see ``MotionPriorOnPolicyRunner.save``):
 
 Shape contract (also documented in downstream_migration_audit.md):
 
-    motion_prior: MLP(prop_obs_dim → motion_prior_hidden_dims → latent_z_dims)
+    motion_prior: MLP(prop_obs_dim + depth_latent_dim → motion_prior_hidden_dims → latent_z_dims)
     mp_mu:        Linear(latent_z_dims, latent_z_dims)
     decoder:      MLP(prop_obs_dim + latent_z_dims → decoder_hidden_dims → num_actions)
+    depth_cnn:    CNNWithProjection((H, W) → output_channels [+pool] → Linear → depth_latent_dim)
 
 This deliberately matches the ``MotionPriorPolicy`` architecture rather than
 the reference ``DownStreamPolicy`` (which routes a fixed 64-d intermediate
@@ -42,8 +44,8 @@ from pathlib import Path
 
 import torch
 
-REQUIRED_KEYS = ("decoder", "motion_prior", "mp_mu")
-VQ_REQUIRED_KEYS = ("decoder", "motion_prior", "quantizer")
+REQUIRED_KEYS = ("decoder", "motion_prior", "mp_mu", "depth_cnn")
+VQ_REQUIRED_KEYS = ("decoder", "motion_prior", "quantizer", "depth_cnn")
 
 
 def load_motion_prior_components(

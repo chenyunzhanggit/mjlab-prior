@@ -18,8 +18,8 @@ from mjlab.tasks.motion_prior.teacher import (
   VELOCITY_TEACHER_CFG,
 )
 
-TEACHER_A_CKPT = Path("~/zcy/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/zcy/mjlab-prior/logs/model_21000.pt").expanduser()
+TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
+TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
 
 # Real student obs dim: 5 proprio terms × history_length=4.
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4

@@ -4,9 +4,9 @@
 > `g1_motion_prior_vq` 两个 task 的策略蒸馏流程，迁移到本仓库 mjlab 环境。
 > **Dual-Teacher 蒸馏**：
 > - `teacher_a` = Teleopit `track.pt`（TemporalCNN, 166 obs + 10 帧 history → 29 dof）
->   → ckpt: `~/zcy/Teleopit/track.pt`
+>   → ckpt: `~/project/Teleopit/track.pt`
 > - `teacher_b` = mjlab `Mjlab-Velocity-Rough-Unitree-G1` 训出的 actor（**plain MLP**, 286 obs → 29 dof）
->   → ckpt: `~/zcy/mjlab-prior/logs/model_21000.pt`
+>   → ckpt: `~/project/mjlab-prior/logs/model_21000.pt`
 
 ---
 
@@ -778,7 +778,7 @@ BPTT-like 更新）。
 
 ### 11. Teleopit Teacher 加载 & ONNX 一致性冒烟测试
 单独写一个 pytest（`tests/test_motion_prior_teacher_load.py`）：
-1. 加载 `~/zcy/Teleopit/track.pt` 到 `TemporalCNNModel`，加载
+1. 加载 `~/project/Teleopit/track.pt` 到 `TemporalCNNModel`，加载
    `~/zcy/Teleopit/track.onnx` 到 `onnxruntime.InferenceSession`
 2. 构造 dummy 输入：`obs (1, D_actor)`, `obs_history (1, 10, D_actor)`，
    值用 `torch.randn(seed=42)` 固定

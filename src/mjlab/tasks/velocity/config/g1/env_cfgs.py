@@ -8,10 +8,12 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import (
   ContactMatch,
   ContactSensorCfg,
+  GridPatternCfg,
   ObjRef,
   RayCastSensorCfg,
   RingPatternCfg,
@@ -20,6 +22,7 @@ from mjlab.sensor import (
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 
 def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -32,12 +35,44 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.scene.entities = {"robot": get_g1_robot_cfg()}
 
-  # Set raycast sensor frame to G1 pelvis.
+  # Set raycast sensor frame to G1 pelvis and bump grid resolution.
+  # 1.6m x 1.0m at 0.1m resolution -> 17 x 11 grid (W x H).
+  terrain_scan_h, terrain_scan_w = 11, 17
   for sensor in cfg.scene.sensors or ():
     if sensor.name == "terrain_scan":
       assert isinstance(sensor, RayCastSensorCfg)
       assert isinstance(sensor.frame, ObjRef)
       sensor.frame.name = "pelvis"
+      sensor.pattern = GridPatternCfg(size=(1.6, 1.0), resolution=0.1)
+
+  # Replace the 1D ``height_scan`` actor/critic terms with a dedicated 2D
+  # ``height`` obs group consumed by the CNN+projection encoder
+  # (see ``unitree_g1_ppo_runner_cfg``). Critic uses the same 2D obs without
+  # noise corruption (group-level enable_corruption=False).
+  cfg.observations["actor"].terms.pop("height_scan", None)
+  cfg.observations["critic"].terms.pop("height_scan", None)
+  terrain_scan_max_distance = 5.0
+  for sensor in cfg.scene.sensors or ():
+    if sensor.name == "terrain_scan":
+      assert isinstance(sensor, RayCastSensorCfg)
+      terrain_scan_max_distance = sensor.max_distance
+      break
+  cfg.observations["height"] = ObservationGroupCfg(
+    terms={
+      "height_scan": ObservationTermCfg(
+        func=envs_mdp.height_scan_2d,
+        params={
+          "sensor_name": "terrain_scan",
+          "height": terrain_scan_h,
+          "width": terrain_scan_w,
+        },
+        noise=Unoise(n_min=-0.1, n_max=0.1),
+        scale=1 / terrain_scan_max_distance,
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=True,
+  )
 
   site_names = ("left_foot", "right_foot")
   geom_names = tuple(
@@ -150,14 +185,65 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   for reward_name in ["foot_clearance", "foot_slip"]:
     cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
 
+  cfg.rewards["track_linear_velocity"].weight = 2.0
+  cfg.rewards["track_angular_velocity"].weight = 2.0
+  cfg.rewards["upright"].weight = 1.0
+  cfg.rewards["pose"].weight = 1.0
   cfg.rewards["body_ang_vel"].weight = -0.05
   cfg.rewards["angular_momentum"].weight = -0.02
-  cfg.rewards["air_time"].weight = 0.0
-
+  cfg.rewards["dof_pos_limits"].weight = -1.0
+  cfg.rewards["action_rate_l2"].weight = -1e-1
+  cfg.rewards["air_time"].weight = 1.0
+  cfg.rewards["foot_clearance"].weight = -1.0
+  cfg.rewards["foot_swing_height"].weight = -0.25
+  cfg.rewards["foot_slip"].weight = 1.0
+  cfg.rewards["soft_landing"].weight = 1.0
   cfg.rewards["self_collisions"] = RewardTermCfg(
     func=mdp.self_collision_cost,
     weight=-1.0,
     params={"sensor_name": self_collision_cfg.name, "force_threshold": 10.0},
+  )
+  cfg.rewards["stuck"] = RewardTermCfg(
+    func=mdp.stuck_penalty,
+    weight=-1.0,
+    params={
+      "vel_threshold": 0.1,
+      "cmd_threshold": 0.1,
+      "command_name": "twist",
+    },
+  )
+  cfg.rewards["cheat"] = RewardTermCfg(
+    func=mdp.cheat_penalty,
+    weight=-1.0,
+    params={
+      "mode": "world_heading",
+      "yaw_threshold": 0.2,
+      "level_threshold": -1,
+      "command_name": "twist",
+      "terrain_classes": (2,),
+    },
+  )
+  cfg.rewards["feet_edge"] = RewardTermCfg(
+    func=mdp.feet_edge_penalty,
+    weight=-1.0,
+    params={
+      "height_sensor_name": "foot_height_scan",
+      "contact_sensor_name": "feet_ground_contact",
+      "height_range_threshold": 0.04,
+      "level_threshold": -1,
+    },
+  )
+  cfg.rewards["foothold"] = RewardTermCfg(
+    func=mdp.foothold_penalty,
+    weight=-1.0,
+    params={
+      "height_sensor_name": "foot_height_scan",
+      "contact_sensor_name": "feet_ground_contact",
+      "epsilon": 0.04,
+      "normalize": True,
+      "level_threshold": -1,
+      "terrain_classes": (2,),
+    },
   )
 
   # Apply play mode overrides.
@@ -203,8 +289,11 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.scene.sensors = tuple(
     s for s in (cfg.scene.sensors or ()) if s.name != "terrain_scan"
   )
-  del cfg.observations["actor"].terms["height_scan"]
-  del cfg.observations["critic"].terms["height_scan"]
+  # NOTE: the flat task has no height scan; the G1 PPO cfg references the
+  # ``height`` obs group, so the flat task is currently incompatible with the
+  # new CNN+projection encoder. If you want to run flat, use a separate rl cfg
+  # without ``obs_groups`` referencing ``height``.
+  cfg.observations.pop("height", None)
 
   cfg.terminations.pop("out_of_terrain_bounds", None)
 

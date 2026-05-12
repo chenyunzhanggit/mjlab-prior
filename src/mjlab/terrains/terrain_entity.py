@@ -145,6 +145,9 @@ class TerrainEntity(Entity):
       gen_cfg = self.cfg.terrain_generator
       proportions = np.array([s.proportion for s in gen_cfg.sub_terrains.values()])
       proportions = proportions / proportions.sum()
+      self._terrain_classes_grid = torch.from_numpy(
+        terrain_generator.terrain_classes
+      ).to(device=self._device, dtype=torch.long)
       self._configure_env_origins(terrain_generator.terrain_origins, proportions)
       self._flat_patches: dict[str, torch.Tensor] = {
         name: torch.from_numpy(arr).to(device=self._device, dtype=torch.float)
@@ -155,6 +158,7 @@ class TerrainEntity(Entity):
       )
     elif self.cfg.terrain_type == "plane":
       self._import_ground_plane("terrain")
+      self._terrain_classes_grid = None
       self._configure_env_origins()
       self._flat_patches: dict[str, torch.Tensor] = {}
       self._flat_patch_radii: dict[str, float] = {}
@@ -212,6 +216,7 @@ class TerrainEntity(Entity):
       self.env_origins = self._compute_env_origins_grid(
         self.cfg.num_envs, self.cfg.env_spacing
       )
+    self._refresh_env_terrain_class()
 
   def update_env_origins(
     self,
@@ -232,6 +237,7 @@ class TerrainEntity(Entity):
     self.env_origins[env_ids] = self.terrain_origins[
       self.terrain_levels[env_ids], self.terrain_types[env_ids]
     ]
+    self._refresh_env_terrain_class(env_ids)
 
   def randomize_env_origins(self, env_ids: torch.Tensor) -> None:
     """Randomize the environment origins to random sub-terrains."""
@@ -249,8 +255,29 @@ class TerrainEntity(Entity):
     self.env_origins[env_ids] = self.terrain_origins[
       self.terrain_levels[env_ids], self.terrain_types[env_ids]
     ]
+    self._refresh_env_terrain_class(env_ids)
 
   # Private methods.
+
+  def _refresh_env_terrain_class(self, env_ids: torch.Tensor | None = None) -> None:
+    """Sync ``env_terrain_class`` from terrain_classes_grid using current
+    (terrain_levels, terrain_types). Allocates the tensor on first call.
+
+    Falls back to all-zeros if no class grid is available (e.g. plane terrain).
+    """
+    if not hasattr(self, "env_terrain_class"):
+      self.env_terrain_class = torch.zeros(
+        self.cfg.num_envs, dtype=torch.long, device=self._device
+      )
+    grid = getattr(self, "_terrain_classes_grid", None)
+    if grid is None or self.terrain_origins is None:
+      return
+    if env_ids is None:
+      self.env_terrain_class[:] = grid[self.terrain_levels, self.terrain_types]
+    else:
+      self.env_terrain_class[env_ids] = grid[
+        self.terrain_levels[env_ids], self.terrain_types[env_ids]
+      ]
 
   def _import_ground_plane(self, name: str) -> None:
     self._spec.worldbody.add_body(name=name).add_geom(

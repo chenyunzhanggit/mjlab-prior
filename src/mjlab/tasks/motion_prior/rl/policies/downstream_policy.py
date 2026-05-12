@@ -1,33 +1,32 @@
 """Downstream-task RL policy that builds on a frozen motion-prior backbone.
 
-Ports ``~/zcy/motionprior/.../my_modules/downstream_task_policy.py:DownStreamPolicy``
-onto mjlab. Architecture (per downstream_migration_audit.md §2):
+Architecture::
 
-  prop_obs (D_prop)  ──► motion_prior MLP ──► z_prior (latent_z_dims)
-                                              │
-                                              ▼
-                                            mp_mu Linear ──► z_prior_mu (latent_z_dims)
-                                                                │
-  policy_obs (D_pol) ──► actor MLP ──► μ_actor (latent_z_dims)   │
-                                          │                     │
-                                          └─ sample (Normal) ──► raw_action (latent_z_dims)
-                                                                │   ┌────────┘
-                                                                ▼   ▼
-                                                            z = z_prior_mu + raw_action
-                                                                │
-                                  cat([prop_obs, z]) ──► decoder MLP ──► action (num_actions)
+  depth_image ──► depth_cnn ──► depth_latent (depth_latent_dim)
+                                  │
+                                  ├──────────────────────────────────────┐
+                                  │                                       │
+  prop_obs    ──┬──cat──► motion_prior MLP ──► h ──► mp_mu ──► z_prior_mu │
+                │                                                         │
+  policy_obs ─┬─┴─cat──► actor MLP ──► μ_actor ──► sample ──► raw_action  │
+              │ (with depth_latent)                          │            │
+              │                                              ▼            ▼
+              │                                          z = z_prior_mu + raw_action
+              │                                              │
+              └──► cat([prop_obs, z]) ──► decoder MLP ──► action
 
-  critic_obs (D_crit) ──► critic MLP ──► value (1)
+  critic_obs ──► critic MLP ──► value
 
 PPO trains on ``raw_action`` (the latent residual). The env steps with
-``recons_action`` (the decoded joint command). Frozen backbone = motion_prior
-+ mp_mu + decoder, loaded strict from a ``MotionPriorOnPolicyRunner`` ckpt
-via ``load_motion_prior_components``.
+``recons_action`` (the decoded joint command). Frozen backbone =
+``depth_cnn`` + ``motion_prior`` + ``mp_mu`` + ``decoder``, loaded strict
+from a ``MotionPriorOnPolicyRunner`` ckpt via ``load_motion_prior_components``.
 
-Deviation from reference: reference hardcodes a 64-d intermediate dim between
-``motion_prior`` and ``mp_mu``; we use ``latent_z_dims`` directly to match
-how ``MotionPriorPolicy`` was actually trained. Functionally equivalent.
-See audit doc §3.
+Both the frozen motion_prior path AND the trainable actor consume the
+``depth_latent`` produced by the shared frozen ``depth_cnn``. ``depth_cnn``
+is run once per transition in ``act()`` and the resulting latent is fed to
+both branches (and stored in the rollout buffer so ``update()`` can rebuild
+the actor distribution without re-rendering depth).
 """
 
 from __future__ import annotations
@@ -40,6 +39,12 @@ import torch.nn as nn
 from rsl_rl.modules import MLP
 from torch.distributions import Normal
 
+from mjlab.rl.cnn_proj import CNNWithProjection
+from mjlab.tasks.motion_prior.rl.policies.motion_prior_policy import (
+  _DEFAULT_DEPTH_CNN_CFG,
+  _DEFAULT_DEPTH_LATENT_DIM,
+  _DEFAULT_DEPTH_SHAPE,
+)
 from mjlab.tasks.motion_prior.teacher.downstream_ckpt_loader import (
   load_motion_prior_components,
 )
@@ -79,6 +84,9 @@ class DownStreamPolicy(nn.Module):
     critic_hidden_dims: tuple[int, ...] = (512, 256, 128),
     activation: str = "elu",
     init_noise_std: float = 1.0,
+    depth_shape: tuple[int, int, int] = _DEFAULT_DEPTH_SHAPE,
+    depth_latent_dim: int = _DEFAULT_DEPTH_LATENT_DIM,
+    depth_cnn_cfg: dict[str, Any] | None = None,
     device: str | torch.device = "cpu",
     **kwargs: Any,
   ) -> None:
@@ -90,12 +98,25 @@ class DownStreamPolicy(nn.Module):
     self.num_actions = num_actions
     self.prop_obs_dim = prop_obs_dim
     self.latent_dim = latent_z_dims  # rsl_rl runner reads this name
+    self.depth_shape = depth_shape
+    self.depth_latent_dim = depth_latent_dim
 
     # ----- frozen motion-prior backbone (load + strict + freeze + eval) ----
     components = load_motion_prior_components(motion_prior_ckpt_path, device=device)
 
+    cnn_channels, cnn_height, cnn_width = depth_shape
+    cnn_kwargs = dict(depth_cnn_cfg or _DEFAULT_DEPTH_CNN_CFG)
+    self.depth_cnn = CNNWithProjection(
+      input_dim=(cnn_height, cnn_width),
+      input_channels=cnn_channels,
+      proj_dim=depth_latent_dim,
+      proj_activation=activation,
+      **cnn_kwargs,
+    )
+    self.depth_cnn.load_state_dict(components["depth_cnn"], strict=True)
+
     self.motion_prior = MLP(
-      prop_obs_dim,
+      prop_obs_dim + depth_latent_dim,
       latent_z_dims,
       hidden_dims=motion_prior_hidden_dims,
       activation=activation,
@@ -113,14 +134,17 @@ class DownStreamPolicy(nn.Module):
     )
     self.decoder.load_state_dict(components["decoder"], strict=True)
 
-    for module in (self.motion_prior, self.mp_mu, self.decoder):
+    for module in (self.depth_cnn, self.motion_prior, self.mp_mu, self.decoder):
       for p in module.parameters():
         p.requires_grad = False
       module.eval()
 
-    # ----- trainable actor (policy_obs -> latent_z residual) -----
+    # ----- trainable actor ([policy_obs, depth_latent] -> latent_z residual) -----
+    # Actor consumes the frozen depth_latent so it can condition its
+    # residual on terrain. depth_cnn is frozen, so gradients only flow
+    # into the actor's input layer (not into the CNN).
     self.actor = MLP(
-      num_obs,
+      num_obs + depth_latent_dim,
       latent_z_dims,
       hidden_dims=actor_hidden_dims,
       activation=activation,
@@ -172,29 +196,55 @@ class DownStreamPolicy(nn.Module):
     assert self.distribution is not None
     return self.distribution.entropy().sum(dim=-1)
 
-  def update_distribution(self, policy_obs: torch.Tensor) -> None:
-    actor_mean = self.actor(policy_obs)
+  def update_distribution(
+    self, policy_obs: torch.Tensor, depth_latent: torch.Tensor
+  ) -> None:
+    """Re-build the actor distribution from ``[policy_obs, depth_latent]``.
+
+    ``depth_latent`` is the output of ``self.depth_cnn``; the caller is
+    responsible for providing it (either freshly computed from a raw depth
+    image, or replayed from the rollout buffer during PPO ``update()``).
+    """
+    actor_mean = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
     std = self.std.expand_as(actor_mean)
     self.distribution = Normal(actor_mean, std)
 
+  def encode_depth(self, depth_image: torch.Tensor) -> torch.Tensor:
+    """CNN-encode depth to a latent vector (frozen weights, no grad)."""
+    with torch.no_grad():
+      return self.depth_cnn(depth_image)
+
+  def _z_prior_mu(
+    self, prop_obs: torch.Tensor, depth_latent: torch.Tensor
+  ) -> torch.Tensor:
+    """Frozen-backbone forward: motion_prior + mp_mu (given depth_latent)."""
+    with torch.no_grad():
+      mp_h = self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
+      return self.mp_mu(mp_h)
+
   def act(
-    self, policy_obs: torch.Tensor, prop_obs: torch.Tensor
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+    self,
+    policy_obs: torch.Tensor,
+    prop_obs: torch.Tensor,
+    depth_image: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sample latent residual, decode through frozen backbone.
 
     Returns:
-      ``(recons_actions, raw_action)``.
+      ``(recons_actions, raw_action, depth_latent)``.
         * ``recons_actions``: (B, num_actions) — joint command for env.step
         * ``raw_action``: (B, latent_z_dims) — what PPO trains on
+        * ``depth_latent``: (B, depth_latent_dim) — frozen CNN output,
+          surfaced so the caller can cache it in the rollout buffer and
+          replay it during ``update()`` without re-running the CNN.
     """
-    self.update_distribution(policy_obs)
+    depth_latent = self.encode_depth(depth_image)
+    self.update_distribution(policy_obs, depth_latent)
     raw_action = self.distribution.sample()  # type: ignore[union-attr]
-    with torch.no_grad():
-      mp_h = self.motion_prior(prop_obs)
-      z_prior_mu = self.mp_mu(mp_h)
+    z_prior_mu = self._z_prior_mu(prop_obs, depth_latent)
     z = z_prior_mu + raw_action
     recons_actions = self.decoder(torch.cat([prop_obs, z], dim=-1))
-    return recons_actions, raw_action
+    return recons_actions, raw_action, depth_latent
 
   def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
     assert self.distribution is not None
@@ -208,12 +258,14 @@ class DownStreamPolicy(nn.Module):
   # --------------------------------------------------------------------- #
 
   def policy_inference(
-    self, policy_obs: torch.Tensor, prop_obs: torch.Tensor
+    self,
+    policy_obs: torch.Tensor,
+    prop_obs: torch.Tensor,
+    depth_image: torch.Tensor,
   ) -> torch.Tensor:
     """Deterministic forward (uses actor mean, no sampling)."""
-    raw_action = self.actor(policy_obs)
-    with torch.no_grad():
-      mp_h = self.motion_prior(prop_obs)
-      z_prior_mu = self.mp_mu(mp_h)
+    depth_latent = self.encode_depth(depth_image)
+    raw_action = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
+    z_prior_mu = self._z_prior_mu(prop_obs, depth_latent)
     z = z_prior_mu + raw_action
     return self.decoder(torch.cat([prop_obs, z], dim=-1))

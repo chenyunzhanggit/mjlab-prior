@@ -1,18 +1,21 @@
 """VQ-VAE downstream-task RL policy.
 
 Same actor / critic / std PPO interface as :class:`DownStreamPolicy`, but
-the frozen backbone is the VQ flavor:
+the frozen backbone is the VQ flavor + depth pipeline:
 
-  prop_obs ──► motion_prior MLP ──► z_prior (code_dim)
-  policy_obs ──► actor MLP ──► raw_action (code_dim)
+  depth_image ──► depth_cnn ──► depth_latent (depth_latent_dim)
                                     │
-                                    ▼
-                              z = z_prior + raw_action
-                                    │
-                                    ▼  (optional: tanh limit + λ scale)
-                                quantizer ──► q_z (code_dim, from codebook)
-                                    │
-       cat([prop_obs, q_z]) ──► decoder MLP ──► action (num_actions)
+  prop_obs ──┬──────────────► cat ──┘──► motion_prior MLP ──► z_prior (code_dim)
+             │                                                       │
+  policy_obs ──► actor MLP ──► raw_action (code_dim)                  │
+                                    │                                │
+                                    ▼  (optional: tanh limit + λ)    │
+                              z = z_prior + raw_action               │
+                                    │                                │
+                                    ▼                                │
+                                quantizer ──► q_z                    │
+                                    │                                │
+       cat([prop_obs, q_z]) ──► decoder MLP ──► action               │
 
 Compared to VAE downstream:
 
@@ -23,6 +26,12 @@ Compared to VAE downstream:
   raw residual through ``λ * tanh(.)`` before adding to the prior. This
   bounds how far the residual can push the latent away from the prior,
   which improves training stability when the codebook is sparse.
+
+Depth pipeline is identical to the VAE downstream: a shared CNN+projection
+turns ``[B, 1, H, W]`` into a ``depth_latent_dim``-d vector concatenated
+with ``prop_obs`` before the frozen motion_prior MLP. The actor remains
+depth-blind (only reads ``policy_obs``); terrain awareness flows through
+the frozen backbone.
 
 The codebook (and EMA stats) stay frozen at deploy — quantizer is read-only.
 """
@@ -37,6 +46,12 @@ import torch.nn as nn
 from rsl_rl.modules import MLP
 from torch.distributions import Normal
 
+from mjlab.rl.cnn_proj import CNNWithProjection
+from mjlab.tasks.motion_prior.rl.policies.motion_prior_policy import (
+  _DEFAULT_DEPTH_CNN_CFG,
+  _DEFAULT_DEPTH_LATENT_DIM,
+  _DEFAULT_DEPTH_SHAPE,
+)
 from mjlab.tasks.motion_prior.rl.policies.quantizer import EMAQuantizer
 from mjlab.tasks.motion_prior.teacher.downstream_ckpt_loader import (
   load_motion_prior_vq_components,
@@ -66,6 +81,9 @@ class DownStreamVQPolicy(nn.Module):
     init_noise_std: float = 1.0,
     use_lab: bool = True,
     lab_lambda: float = 3.0,
+    depth_shape: tuple[int, int, int] = _DEFAULT_DEPTH_SHAPE,
+    depth_latent_dim: int = _DEFAULT_DEPTH_LATENT_DIM,
+    depth_cnn_cfg: dict[str, Any] | None = None,
     device: str | torch.device = "cpu",
     **kwargs: Any,
   ) -> None:
@@ -83,12 +101,25 @@ class DownStreamVQPolicy(nn.Module):
     self.use_lab = use_lab
     self.lab_lambda = lab_lambda
     self.latent_dim = code_dim  # rsl_rl runner reads this name
+    self.depth_shape = depth_shape
+    self.depth_latent_dim = depth_latent_dim
 
     # ----- frozen VQ backbone ----- #
     components = load_motion_prior_vq_components(motion_prior_ckpt_path, device=device)
 
+    cnn_channels, cnn_height, cnn_width = depth_shape
+    cnn_kwargs = dict(depth_cnn_cfg or _DEFAULT_DEPTH_CNN_CFG)
+    self.depth_cnn = CNNWithProjection(
+      input_dim=(cnn_height, cnn_width),
+      input_channels=cnn_channels,
+      proj_dim=depth_latent_dim,
+      proj_activation=activation,
+      **cnn_kwargs,
+    )
+    self.depth_cnn.load_state_dict(components["depth_cnn"], strict=True)
+
     self.motion_prior = MLP(
-      prop_obs_dim,
+      prop_obs_dim + depth_latent_dim,
       code_dim,
       hidden_dims=motion_prior_hidden_dims,
       activation=activation,
@@ -108,14 +139,17 @@ class DownStreamVQPolicy(nn.Module):
     )
     self.decoder.load_state_dict(components["decoder"], strict=True)
 
-    for module in (self.motion_prior, self.quantizer, self.decoder):
+    for module in (self.depth_cnn, self.motion_prior, self.quantizer, self.decoder):
       for p in module.parameters():
         p.requires_grad = False
       module.eval()
 
     # ----- trainable actor / critic / std ----- #
+    # Actor consumes the frozen depth_latent (same one fed to motion_prior).
+    # depth_cnn weights are frozen — actor only gets gradients on its own
+    # input layer, not the CNN.
     self.actor = MLP(
-      num_obs,
+      num_obs + depth_latent_dim,
       code_dim,
       hidden_dims=actor_hidden_dims,
       activation=activation,
@@ -162,10 +196,18 @@ class DownStreamVQPolicy(nn.Module):
     assert self.distribution is not None
     return self.distribution.entropy().sum(dim=-1)
 
-  def update_distribution(self, policy_obs: torch.Tensor) -> None:
-    actor_mean = self.actor(policy_obs)
+  def update_distribution(
+    self, policy_obs: torch.Tensor, depth_latent: torch.Tensor
+  ) -> None:
+    """Re-build the actor distribution from ``[policy_obs, depth_latent]``."""
+    actor_mean = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
     std = self.std.expand_as(actor_mean)
     self.distribution = Normal(actor_mean, std)
+
+  def encode_depth(self, depth_image: torch.Tensor) -> torch.Tensor:
+    """CNN-encode depth to a latent vector (frozen weights, no grad)."""
+    with torch.no_grad():
+      return self.depth_cnn(depth_image)
 
   def _combine(
     self, prior_latent: torch.Tensor, raw_action: torch.Tensor
@@ -175,21 +217,36 @@ class DownStreamVQPolicy(nn.Module):
       return prior_latent + self.lab_lambda * torch.tanh(raw_action)
     return prior_latent + raw_action
 
-  def act(
-    self, policy_obs: torch.Tensor, prop_obs: torch.Tensor
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample latent residual, combine with prior, quantize, decode."""
-    self.update_distribution(policy_obs)
-    raw_action = self.distribution.sample()  # type: ignore[union-attr]
+  def _prior_latent(
+    self, prop_obs: torch.Tensor, depth_latent: torch.Tensor
+  ) -> torch.Tensor:
+    """Frozen backbone forward: motion_prior (no quantizer yet)."""
     with torch.no_grad():
-      prior_latent = self.motion_prior(prop_obs)
+      return self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
+
+  def act(
+    self,
+    policy_obs: torch.Tensor,
+    prop_obs: torch.Tensor,
+    depth_image: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample latent residual, combine with prior, quantize, decode.
+
+    Returns ``(recons_actions, raw_action, depth_latent)``. The ``depth_latent``
+    is surfaced so the runner can cache it in the rollout buffer and replay
+    it during PPO ``update()`` without re-rendering depth.
+    """
+    depth_latent = self.encode_depth(depth_image)
+    self.update_distribution(policy_obs, depth_latent)
+    raw_action = self.distribution.sample()  # type: ignore[union-attr]
+    prior_latent = self._prior_latent(prop_obs, depth_latent)
     z = self._combine(prior_latent, raw_action)
     with torch.no_grad():
       # Quantize at inference; we never update the codebook from the
       # downstream actor (codebook is frozen).
       q_z, _, _ = self.quantizer(z, training=False)
     recons_actions = self.decoder(torch.cat([prop_obs, q_z], dim=-1))
-    return recons_actions, raw_action
+    return recons_actions, raw_action, depth_latent
 
   def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
     assert self.distribution is not None
@@ -201,12 +258,15 @@ class DownStreamVQPolicy(nn.Module):
   # --------------------------- inference --------------------------- #
 
   def policy_inference(
-    self, policy_obs: torch.Tensor, prop_obs: torch.Tensor
+    self,
+    policy_obs: torch.Tensor,
+    prop_obs: torch.Tensor,
+    depth_image: torch.Tensor,
   ) -> torch.Tensor:
     """Deterministic forward (uses actor mean, no Normal sampling)."""
-    raw_action = self.actor(policy_obs)
-    with torch.no_grad():
-      prior_latent = self.motion_prior(prop_obs)
+    depth_latent = self.encode_depth(depth_image)
+    raw_action = self.actor(torch.cat([policy_obs, depth_latent], dim=-1))
+    prior_latent = self._prior_latent(prop_obs, depth_latent)
     z = self._combine(prior_latent, raw_action)
     with torch.no_grad():
       q_z, _, _ = self.quantizer(z, training=False)

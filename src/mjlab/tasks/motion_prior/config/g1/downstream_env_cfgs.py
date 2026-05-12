@@ -21,11 +21,15 @@ downstream task's reward structure out of the box.
 
 from __future__ import annotations
 
+import os
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.tasks.motion_prior.config.g1.env_cfgs import _make_g1_depth_camera_cfg
 from mjlab.tasks.motion_prior.observations_cfg import (
   STUDENT_HISTORY_LENGTH,
+  make_student_depth_obs_group,
   make_student_height_scan_term,
   make_student_obs_group,
 )
@@ -75,16 +79,22 @@ def _make_policy_obs_group(
   twist_command_name: str = "twist",
   height_scan_sensor_name: str = "terrain_scan",
   enable_corruption: bool = True,
+  use_depth: bool = True,
 ) -> ObservationGroupCfg:
-  """Actor obs: ``velocity_commands`` (3) + 5 proprio × hist=4 + height_scan."""
+  """Actor obs: ``velocity_commands`` (3) + 5 proprio x hist=4 [+ height_scan].
+
+  When ``use_depth=True`` the flat ``height_scan`` term is dropped — depth
+  enters via a separate ``"depth"`` group fed to a CNN encoder.
+  """
   terms: dict[str, ObservationTermCfg] = {
     "velocity_commands": ObservationTermCfg(
       func=velocity_mdp.generated_commands,
       params={"command_name": twist_command_name},
     ),
     **_make_proprio_terms(),
-    "height_scan": make_student_height_scan_term(height_scan_sensor_name),
   }
+  if not use_depth:
+    terms["height_scan"] = make_student_height_scan_term(height_scan_sensor_name)
   return ObservationGroupCfg(
     terms=terms,
     concatenate_terms=True,
@@ -97,7 +107,11 @@ def _make_critic_obs_group(
   height_scan_sensor_name: str = "terrain_scan",
   enable_corruption: bool = False,
 ) -> ObservationGroupCfg:
-  """Critic obs = policy obs + ``base_lin_vel`` privileged term."""
+  """Critic obs = policy obs + ``base_lin_vel`` + privileged ``height_scan``.
+
+  Critic always keeps the dense scandot regardless of ``use_depth``
+  (asymmetric actor-critic: sim-only access to ground truth terrain).
+  """
   terms: dict[str, ObservationTermCfg] = {
     "velocity_commands": ObservationTermCfg(
       func=velocity_mdp.generated_commands,
@@ -117,43 +131,71 @@ def _make_critic_obs_group(
   )
 
 
-def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """G1 velocity-tracking downstream env on rough terrain."""
+def unitree_g1_downstream_velocity_env_cfg(
+  play: bool = False, use_depth: bool = True
+) -> ManagerBasedRlEnvCfg:
+  """G1 velocity-tracking downstream env on rough terrain.
+
+  ``use_depth=True``: actor (``policy``) and frozen ``motion_prior_obs``
+  drop ``height_scan`` and read a separate ``"depth"`` group; critic keeps
+  scandot as a privileged signal. ``use_depth=False`` falls back to the
+  scandot-only schema for back-compat / ablation.
+  """
   cfg = unitree_g1_rough_env_cfg(play=play)
 
   cfg.rewards["track_linear_velocity"].weight = 2.0
-  cfg.rewards["track_angular_velocity"].weight = 2.0       
-  cfg.rewards["upright"].weight = 0.0       
-  cfg.rewards["pose"].weight = 0.0       
-  cfg.rewards["body_ang_vel"].weight = 0.0       
-  cfg.rewards["angular_momentum"].weight = 0.0       
-  cfg.rewards["dof_pos_limits"].weight = 0.0       
-  cfg.rewards["action_rate_l2"].weight = 0.0       
-  cfg.rewards["air_time"].weight = 0.0       
-  cfg.rewards["foot_clearance"].weight = 0.0       
-  cfg.rewards["foot_swing_height"].weight = 0.0        
-  cfg.rewards["foot_slip"].weight = 0.0 
-  cfg.rewards["soft_landing"].weight = 0.0 
-  cfg.rewards["self_collisions"].weight = 0.0                                                                      
-                        
+  cfg.rewards["track_angular_velocity"].weight = 2.0
+  cfg.rewards["upright"].weight = 0.0
+  cfg.rewards["pose"].weight = 0.0
+  cfg.rewards["body_ang_vel"].weight = 0.0
+  cfg.rewards["angular_momentum"].weight = 0.0
+  cfg.rewards["dof_pos_limits"].weight = 0.0
+  cfg.rewards["action_rate_l2"].weight = 0.0
+  cfg.rewards["air_time"].weight = 0.0
+  cfg.rewards["foot_clearance"].weight = 0.0
+  cfg.rewards["foot_swing_height"].weight = 0.0
+  cfg.rewards["foot_slip"].weight = 0.0
+  cfg.rewards["soft_landing"].weight = 0.0
+  cfg.rewards["self_collisions"].weight = 0.0
+
+  if use_depth:
+    existing = tuple(cfg.scene.sensors or ())
+    if not any(s.name == "camera" for s in existing):
+      cfg.scene.sensors = existing + (_make_g1_depth_camera_cfg(),)
+
   enable_corruption = not play
+  if use_depth:
+    motion_prior_extra: dict = {}
+  else:
+    motion_prior_extra = {
+      "height_scan": make_student_height_scan_term("terrain_scan"),
+    }
   cfg.observations = {
     # Frozen ``motion_prior`` MLP input — schema fixed by motion-prior training.
     "motion_prior_obs": make_student_obs_group(
       enable_corruption=enable_corruption,
-      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+      extra_terms=motion_prior_extra,
     ),
     # Trainable actor sees the task command in addition.
     "policy": _make_policy_obs_group(
       twist_command_name="twist",
       height_scan_sensor_name="terrain_scan",
       enable_corruption=enable_corruption,
+      use_depth=use_depth,
     ),
-    # Critic gets privileged base_lin_vel on top.
+    # Critic gets privileged base_lin_vel + scandot (always).
     "critic": _make_critic_obs_group(
       twist_command_name="twist",
       height_scan_sensor_name="terrain_scan",
       enable_corruption=False,
     ),
   }
+  if use_depth:
+    cfg.observations["depth"] = make_student_depth_obs_group()
+  if play and os.environ.get("MJLAB_DOWNSTREAM_PLAY_TERRAIN", "rough") == "flat":
+    assert cfg.scene.terrain is not None
+    cfg.scene.terrain.terrain_type = "plane"
+    cfg.scene.terrain.terrain_generator = None
+    cfg.terminations.pop("out_of_terrain_bounds", None)
+    cfg.curriculum.pop("terrain_levels", None)
   return cfg

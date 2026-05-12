@@ -64,6 +64,7 @@ class _DownStreamRolloutStorage:
     policy_obs_shape: tuple[int, ...],
     prop_obs_shape: tuple[int, ...],
     critic_obs_shape: tuple[int, ...],
+    depth_latent_shape: tuple[int, ...],
     action_shape: tuple[int, ...],
     device: str | torch.device,
   ) -> None:
@@ -71,9 +72,17 @@ class _DownStreamRolloutStorage:
     self.num_steps = num_steps
     self.device = device
 
+    # NB: we store the *depth latent* (128-d after CNN), not the raw depth
+    # image (60×60 = 3600 floats). The CNN is frozen, so the latent is
+    # invariant for a given rollout and can be reused verbatim during
+    # ``update()`` — no need to re-render. Storing the latent instead of
+    # the image cuts buffer memory ~28x.
     self.policy_obs = torch.zeros(num_steps, num_envs, *policy_obs_shape, device=device)
     self.prop_obs = torch.zeros(num_steps, num_envs, *prop_obs_shape, device=device)
     self.critic_obs = torch.zeros(num_steps, num_envs, *critic_obs_shape, device=device)
+    self.depth_latent = torch.zeros(
+      num_steps, num_envs, *depth_latent_shape, device=device
+    )
     self.actions = torch.zeros(num_steps, num_envs, *action_shape, device=device)
     self.rewards = torch.zeros(num_steps, num_envs, device=device)
     self.dones = torch.zeros(num_steps, num_envs, device=device, dtype=torch.float32)
@@ -93,6 +102,7 @@ class _DownStreamRolloutStorage:
     policy_obs: torch.Tensor,
     prop_obs: torch.Tensor,
     critic_obs: torch.Tensor,
+    depth_latent: torch.Tensor,
     actions: torch.Tensor,
     rewards: torch.Tensor,
     dones: torch.Tensor,
@@ -107,6 +117,7 @@ class _DownStreamRolloutStorage:
     self.policy_obs[i] = policy_obs
     self.prop_obs[i] = prop_obs
     self.critic_obs[i] = critic_obs
+    self.depth_latent[i] = depth_latent
     self.actions[i] = actions
     self.rewards[i] = rewards.float()
     self.dones[i] = dones.float()
@@ -146,6 +157,7 @@ class _DownStreamRolloutStorage:
       "policy_obs": self.policy_obs.reshape(n_total, *self.policy_obs.shape[2:]),
       "prop_obs": self.prop_obs.reshape(n_total, *self.prop_obs.shape[2:]),
       "critic_obs": self.critic_obs.reshape(n_total, *self.critic_obs.shape[2:]),
+      "depth_latent": self.depth_latent.reshape(n_total, *self.depth_latent.shape[2:]),
       "actions": self.actions.reshape(n_total, *self.actions.shape[2:]),
       "values": self.values.reshape(n_total),
       "advantages": self.advantages.reshape(n_total),
@@ -194,6 +206,7 @@ class DownStreamPPO:
       policy_obs_shape=policy_obs_shape,
       prop_obs_shape=prop_obs_shape,
       critic_obs_shape=critic_obs_shape,
+      depth_latent_shape=(self.policy.depth_latent_dim,),
       action_shape=(self.policy.latent_dim,),
       device=self.device,
     )
@@ -205,10 +218,20 @@ class DownStreamPPO:
     policy_obs: torch.Tensor,
     prop_obs: torch.Tensor,
     critic_obs: torch.Tensor,
+    depth_image: torch.Tensor,
   ) -> torch.Tensor:
-    """Sample one transition. Returns ``recons_actions`` for env.step."""
+    """Sample one transition. Returns ``recons_actions`` for env.step.
+
+    The frozen ``depth_cnn`` runs once inside ``policy.act`` and the
+    resulting ``depth_latent`` is cached in the rollout buffer. PPO's
+    inner ``update()`` then rebuilds the actor distribution from
+    ``[policy_obs, depth_latent]`` without re-rendering depth — the CNN
+    is frozen so the cached latent is exactly what re-encoding would yield.
+    """
     assert self.storage is not None
-    recons_actions, raw_action = self.policy.act(policy_obs, prop_obs)
+    recons_actions, raw_action, depth_latent = self.policy.act(
+      policy_obs, prop_obs, depth_image
+    )
     log_prob = self.policy.get_actions_log_prob(raw_action).detach()
     value = self.policy.evaluate(critic_obs).detach()
     mu = self.policy.action_mean.detach()
@@ -218,6 +241,7 @@ class DownStreamPPO:
       policy_obs=policy_obs.detach(),
       prop_obs=prop_obs.detach(),
       critic_obs=critic_obs.detach(),
+      depth_latent=depth_latent.detach(),
       actions=raw_action.detach(),
       values=value,
       actions_log_prob=log_prob,
@@ -249,8 +273,11 @@ class DownStreamPPO:
     for batch in self.storage.mini_batch_generator(
       cfg.num_mini_batches, cfg.num_learning_epochs
     ):
-      # Re-evaluate actor / critic at current parameters.
-      self.policy.update_distribution(batch["policy_obs"])
+      # Re-evaluate actor / critic at current parameters. The actor reads
+      # ``[policy_obs, depth_latent]``; ``depth_latent`` is the cached
+      # output of the frozen ``depth_cnn`` from rollout time (identical to
+      # what re-encoding would yield since the CNN never trains).
+      self.policy.update_distribution(batch["policy_obs"], batch["depth_latent"])
       log_prob_batch = self.policy.get_actions_log_prob(batch["actions"])
       mu_batch = self.policy.action_mean
       sigma_batch = self.policy.action_std

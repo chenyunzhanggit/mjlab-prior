@@ -21,8 +21,8 @@ from mjlab.tasks.motion_prior.teacher import (
   VELOCITY_TEACHER_CFG,
 )
 
-TEACHER_A_CKPT = Path("~/zcy/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/zcy/mjlab-prior/logs/model_21000.pt").expanduser()
+TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
+TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
 
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4
 NUM_ACTIONS = 29

@@ -284,18 +284,23 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
   border_width=20.0,
   num_rows=10,
   num_cols=20,
+  # terrain_class follows MoRE convention: 0=easy/flat, 1=medium/slope, 2=hard/stairs.
   sub_terrains={
-    "flat": flat(proportion=0.2),
-    "pyramid_stairs": pyramid_stairs(proportion=0.2, step_height_range=(0.06, 0.20)),
+    "flat": flat(proportion=0.3, terrain_class=0),
+    "pyramid_stairs": pyramid_stairs(
+      proportion=0.35, step_height_range=(0.06, 0.15), terrain_class=2
+    ),
     "pyramid_stairs_inv": pyramid_stairs_inv(
-      proportion=0.2, step_height_range=(0.06, 0.20)
+      proportion=0.35, step_height_range=(0.06, 0.15), terrain_class=2
     ),
-    "hf_pyramid_slope": hf_pyramid_slope(proportion=0.1, slope_range=(0.0, 0.3)),
+    "hf_pyramid_slope": hf_pyramid_slope(
+      proportion=0.0, slope_range=(0.0, 0.3), terrain_class=1
+    ),
     "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
-      proportion=0.1, slope_range=(0.0, 0.3)
+      proportion=0.0, slope_range=(0.0, 0.3), terrain_class=1
     ),
-    "random_rough": random_rough(proportion=0.1),
-    "wave_terrain": wave_terrain(proportion=0.1),
+    "random_rough": random_rough(proportion=0.0, terrain_class=0),
+    "wave_terrain": wave_terrain(proportion=0.0, terrain_class=1),
   },
   add_lights=True,
 )
