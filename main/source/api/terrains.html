@@ -59,7 +59,7 @@
     <link rel="prev" title="mjlab.managers" href="managers.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="May 06, 2026"/>
+    <meta name="docbuild:last-update" content="May 12, 2026"/>
   </head>
   
   
@@ -505,6 +505,7 @@ document.write(`
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.proportion"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.proportion</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.size"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.size</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.flat_patch_sampling"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.flat_patch_sampling</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.terrain_class"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.terrain_class</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.function"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.function()</span></code></a></li>
 </ul>
 </li>
@@ -986,6 +987,16 @@ exactly one column; proportion only affects spawning distribution.</p>
 <dt class="sig sig-object py" id="mjlab.terrains.SubTerrainCfg.flat_patch_sampling">
 <span class="sig-name descname"><span class="pre">flat_patch_sampling</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#mjlab.terrains.FlatPatchSamplingCfg" title="mjlab.terrains.terrain_generator.FlatPatchSamplingCfg"><span class="pre">FlatPatchSamplingCfg</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#mjlab.terrains.SubTerrainCfg.flat_patch_sampling" title="Link to this definition">#</a></dt>
 <dd><p>Named flat-patch sampling configurations, or None to disable.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="mjlab.terrains.SubTerrainCfg.terrain_class">
+<span class="sig-name descname"><span class="pre">terrain_class</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#mjlab.terrains.SubTerrainCfg.terrain_class" title="Link to this definition">#</a></dt>
+<dd><p>Coarse class label for this sub-terrain.</p>
+<p>Used to switch downstream behavior per terrain type (e.g. force forward-only
+velocity commands and skip yaw randomization on hard terrains). Class IDs are
+application-defined; a common convention is 0=easy/flat, 1=medium/slope,
+2=hard/stairs.</p>
 </dd></dl>
 
 <dl class="py method">
@@ -1979,6 +1990,7 @@ to reduce geom count.</p>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.proportion"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.proportion</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.size"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.size</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.flat_patch_sampling"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.flat_patch_sampling</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.terrain_class"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.terrain_class</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.terrains.SubTerrainCfg.function"><code class="docutils literal notranslate"><span class="pre">SubTerrainCfg.function()</span></code></a></li>
 </ul>
 </li>
@@ -2197,7 +2209,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on May 06, 2026.
+  Last updated on May 12, 2026.
   <br/>
 </p>
   </div>
