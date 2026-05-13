@@ -76,10 +76,15 @@ def make_soccer_ball_spec(params: SoccerBallParams):
   def _spec_fn() -> mujoco.MjSpec:
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="ball")
-    # Single 6-DOF free joint. ``damping`` is a scalar applied to all 6
-    # DOFs (linear & angular). Free joint pose is set via mjlab's
+    # Single 6-DOF free joint. Joint pose is set via mjlab's
     # ``write_root_state_to_sim`` — matches the floating-base flow used
-    # by the manipulation cube example.
+    # by the manipulation cube example. Damping is intentionally NOT
+    # set on the MjsJoint here: the python ``MjsJoint.damping`` setter
+    # has a strict, version-dependent shape contract (some builds want
+    # ``ndarray[(3, 1)]``) that's brittle to rely on. Instead the env
+    # configuration installs a ``dr.dof_damping`` startup event with a
+    # zero-width range to deterministically set ``dof_damping``
+    # post-compile. See ``config/g1/env_cfgs.py:_add_soccer_ball``.
     body.add_freejoint(name="ball_freejoint")
     body.add_geom(
       name="ball_geom",
@@ -88,12 +93,6 @@ def make_soccer_ball_spec(params: SoccerBallParams):
       mass=params.mass,
       rgba=params.rgba,
     )
-    # Set damping on the freejoint after creation (MjSpec.add_freejoint
-    # doesn't accept damping in its signature).
-    for j in spec.joints:
-      if j.name == "ball_freejoint":
-        j.damping = params.linear_damping
-        break
     return spec
 
   return _spec_fn

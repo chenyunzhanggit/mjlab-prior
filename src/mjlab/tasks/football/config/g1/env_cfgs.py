@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
+from mjlab.envs.mdp import dr as envs_dr
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import (
   ObservationGroupCfg,
@@ -169,7 +170,14 @@ def _add_soccer_ball(
   cfg: ManagerBasedRlEnvCfg,
   params: SoccerBallParams,
 ) -> None:
-  """Add the soccer ball entity + ball contact sensor to the scene."""
+  """Add the soccer ball entity, contact sensor, and damping startup event.
+
+  Damping isn't set inside the MjSpec (the python ``MjsJoint.damping``
+  setter has a brittle version-dependent shape contract). Instead a
+  ``mode="startup"`` event uses mjlab's domain-randomization helper to
+  write ``dof_damping[ball_freejoint]`` deterministically with a
+  zero-width range. ``operation="abs"`` overwrites any default value.
+  """
   cfg.scene.entities = {
     **cfg.scene.entities,
     _BALL_ENTITY: soccer_ball_entity_cfg(params),
@@ -179,6 +187,20 @@ def _add_soccer_ball(
   cfg.scene.sensors = (
     *(cfg.scene.sensors or ()),
     _make_ball_contact_sensor_cfg(robot_foot_geoms),
+  )
+
+  # Set ball joint damping post-compile via a zero-width DR range.
+  # ``use_address=True`` (inside ``dr.dof_damping``) expands the single
+  # freejoint into its 6 underlying DOF addresses, so the same scalar
+  # value is written to all 6.
+  cfg.events["ball_damping"] = EventTermCfg(
+    func=envs_dr.dof_damping,
+    mode="startup",
+    params={
+      "asset_cfg": SceneEntityCfg(_BALL_ENTITY, joint_names=(".*",)),
+      "operation": "abs",
+      "ranges": (params.linear_damping, params.linear_damping),
+    },
   )
 
 
