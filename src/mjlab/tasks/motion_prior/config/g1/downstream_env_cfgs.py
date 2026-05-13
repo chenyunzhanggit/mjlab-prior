@@ -114,17 +114,21 @@ def _make_proprio_terms(
 
 def _make_motion_prior_obs_group(
   enable_corruption: bool = True,
-  with_height_scan: bool = True,
+  with_height_scan: bool = False,
 ) -> ObservationGroupCfg:
   """Frozen motion_prior backbone input.
 
-  Defaults to **5 proprio × hist=4 (372) + height_scan (187)** = 559-dim,
-  matching the prop_obs_dim of our ``MotionPriorSingleVQ`` ckpt.
+  Defaults to **5 proprio × hist=4 = 372-dim** (proprio only). Used to
+  default to 559-dim (proprio + height_scan); now matches the
+  user-retrained motion_prior ckpt which drops the height_scan slice.
 
-  Set ``with_height_scan=False`` to drop the scan (372-dim, matches
-  reference's plain motionprior ckpt). The terrain_scan sensor injection
-  in :func:`unitree_g1_downstream_velocity_env_cfg` is the env-side
-  prerequisite for keeping the height_scan term wired up.
+  Set ``with_height_scan=True`` to restore the 187-dim height_scan
+  slice (559-dim total). Requires:
+    1. The env scene has a ``terrain_scan`` raycast sensor (use
+       :func:`_make_g1_terrain_scan_sensor` and add it to ``scene.sensors``).
+    2. A motion_prior ckpt that was trained with height_scan in student
+       obs (the disabled-by-default ``extra_terms`` line in
+       :mod:`env_cfgs` controls the training side).
   """
   terms = _make_proprio_terms()
   if with_height_scan:
@@ -212,23 +216,26 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   """
   cfg = unitree_g1_flat_env_cfg(play=play)
 
-  # Re-inject the ``terrain_scan`` raycast sensor that
-  # ``unitree_g1_flat_env_cfg`` strips. The flat env removes it because
-  # actor/critic obs there don't use height_scan; here we need it back
-  # so the frozen motion_prior backbone gets its height-scan slice.
-  if not any(s.name == "terrain_scan" for s in (cfg.scene.sensors or ())):
-    cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_terrain_scan_sensor())
+  # ---- terrain_scan injection DISABLED (user request) ----------------
+  # Previously we re-injected the ``terrain_scan`` raycast that
+  # ``unitree_g1_flat_env_cfg`` strips, because the frozen motion_prior
+  # backbone read a 187-dim height_scan slice. Now we use a proprio-only
+  # 372-dim motion_prior ckpt; the sensor isn't needed. To re-enable,
+  # uncomment the block below AND flip ``with_height_scan=True`` on the
+  # ``motion_prior_obs`` group construction.
+  # if not any(s.name == "terrain_scan" for s in (cfg.scene.sensors or ())):
+  #   cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_terrain_scan_sensor())
 
   enable_corruption = not play
 
   # -------------------- Observations -------------------- #
   cfg.observations = {
     # Frozen motion_prior MLP input — must match the ckpt's prop_obs_dim.
-    # We have height_scan ON by default (559-dim) to match our trained
+    # Default is 372-dim (proprio only) matching the user-retrained
     # ``Mjlab-MotionPrior-Single-VQ-Trackingbfm-Unitree-G1`` ckpt.
     "motion_prior_obs": _make_motion_prior_obs_group(
       enable_corruption=enable_corruption,
-      with_height_scan=True,
+      # with_height_scan=True,  # re-enable for the old 559-dim ckpts
     ),
     # Trainable actor: prepends velocity command to proprio (no height_scan).
     "policy": _make_policy_obs_group(

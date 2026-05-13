@@ -85,7 +85,7 @@ def _make_football_obs_groups(
   policy_extra_terms: dict[str, ObservationTermCfg],
   critic_extra_terms: dict[str, ObservationTermCfg],
   enable_corruption: bool,
-  with_height_scan: bool = True,
+  with_height_scan: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
   """Build motion_prior_obs / policy / critic groups for one football task.
 
@@ -209,7 +209,11 @@ def _add_soccer_ball(
 def unitree_g1_dribbling_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = unitree_g1_flat_env_cfg(play=play)
   _strip_velocity_extras(cfg)
-  _inject_terrain_scan(cfg)
+  # ---- terrain_scan injection DISABLED (user request) ----
+  # Re-enable together with ``with_height_scan=True`` on
+  # ``_make_football_obs_groups`` to restore the 187-dim height_scan
+  # slice in motion_prior_obs (needed for the legacy 559-dim ckpts).
+  # _inject_terrain_scan(cfg)
 
   cfg.scene.env_spacing = 5.0
   cfg.episode_length_s = 50.0
@@ -406,7 +410,11 @@ def unitree_g1_dribbling_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def unitree_g1_kicking_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = unitree_g1_flat_env_cfg(play=play)
   _strip_velocity_extras(cfg)
-  _inject_terrain_scan(cfg)
+  # ---- terrain_scan injection DISABLED (user request) ----
+  # Re-enable together with ``with_height_scan=True`` on
+  # ``_make_football_obs_groups`` to restore the 187-dim height_scan
+  # slice in motion_prior_obs (needed for the legacy 559-dim ckpts).
+  # _inject_terrain_scan(cfg)
 
   cfg.scene.env_spacing = 6.0
   cfg.episode_length_s = 20.0
@@ -588,7 +596,11 @@ def unitree_g1_kicking_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = unitree_g1_flat_env_cfg(play=play)
   _strip_velocity_extras(cfg)
-  _inject_terrain_scan(cfg)
+  # ---- terrain_scan injection DISABLED (user request) ----
+  # Re-enable together with ``with_height_scan=True`` on
+  # ``_make_football_obs_groups`` to restore the 187-dim height_scan
+  # slice in motion_prior_obs (needed for the legacy 559-dim ckpts).
+  # _inject_terrain_scan(cfg)
 
   cfg.scene.env_spacing = 10.0
   cfg.episode_length_s = 20.0

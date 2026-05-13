@@ -72,14 +72,16 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
   """
   cfg = unitree_g1_flat_tracking_env_cfg(has_state_estimation=True, play=play)
 
-  # Inject a terrain_scan raycast that matches rough env's spec, so the
-  # student obs has an identical height_scan slice on both envs (required
-  # for dual-env distillation into a shared latent space). On the flat
-  # plane every ray returns the same constant height, but the dimension
-  # and code path are the ones we'll use on rough / future deploy.
-  existing = tuple(cfg.scene.sensors or ())
-  if not any(s.name == "terrain_scan" for s in existing):
-    cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
+  # ---- height_scan / terrain_scan DISABLED (user request) -----------
+  # Originally we injected a ``terrain_scan`` raycast so the student obs
+  # had the same height_scan slice across flat / rough / deploy envs.
+  # Now student obs is proprio-only (372-dim instead of 559-dim). To
+  # re-enable height-scan-aware student obs, uncomment the block below
+  # AND uncomment ``extra_terms={"height_scan": ...}`` in the student
+  # obs group construction below.
+  # existing = tuple(cfg.scene.sensors or ())
+  # if not any(s.name == "terrain_scan" for s in existing):
+  #   cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
 
   # Swap single-motion -> multi-motion. Carry over every field so the
   # tracking-task defaults (resampling_time_range, pose/velocity ranges,
@@ -117,7 +119,11 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
   cfg.observations = {
     "student": make_student_obs_group(
       enable_corruption=enable_corruption,
-      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+      # ---- height_scan DISABLED (student obs is proprio-only) ----
+      # To re-enable: also re-enable the terrain_scan sensor injection
+      # above. Re-trains needed for downstream tasks whose ckpt expects
+      # the height_scan slice.
+      # extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
     ),
     "teacher_a": teacher_a,
     "teacher_a_history": teacher_a_history,
@@ -138,17 +144,26 @@ def unitree_g1_flat_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEn
 
 
 def unitree_g1_rough_motion_prior_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Rough motion-prior env (teacher_b / velocity branch)."""
+  """Rough motion-prior env (teacher_b / velocity branch).
+
+  NOTE: ``teacher_b`` is the FROZEN velocity MLP, which was trained
+  with ``height_scan`` in its actor input. Its obs group still includes
+  ``height_scan`` (we cannot drop it without breaking the frozen
+  teacher). Only the ``student`` obs is proprio-only now.
+  """
   cfg = unitree_g1_rough_env_cfg(play=play)
 
   enable_corruption = not play
   cfg.observations = {
     "student": make_student_obs_group(
       enable_corruption=enable_corruption,
-      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+      # ---- height_scan DISABLED in student (user request) ----
+      # extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
     ),
     "teacher_b": make_teacher_b_obs_group(
       twist_command_name="twist",
+      # KEEP — frozen velocity teacher_b requires height_scan; this is
+      # the teacher's own actor obs, not the student's.
       height_scan_sensor_name="terrain_scan",
       enable_corruption=enable_corruption,
     ),
@@ -185,19 +200,20 @@ def unitree_g1_flat_motion_prior_single_env_cfg(
   """
   cfg = unitree_g1_flat_tracking_bfm_env_cfg(has_state_estimation=True, play=play)
 
-  # Inject a terrain_scan raycast so the student obs has an identical
-  # height_scan slice across all motion-prior variants. Same spec as the
-  # rough env's terrain_scan; flat plane returns a constant height but the
-  # dim and code path match deploy / dual-env distillation.
-  existing = tuple(cfg.scene.sensors or ())
-  if not any(s.name == "terrain_scan" for s in existing):
-    cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
+  # ---- height_scan / terrain_scan DISABLED (user request) -----------
+  # Originally we injected a ``terrain_scan`` raycast so the student
+  # obs had a height_scan slice (559-dim student). Now student is
+  # proprio-only (372-dim). To re-enable, uncomment both blocks below.
+  # existing = tuple(cfg.scene.sensors or ())
+  # if not any(s.name == "terrain_scan" for s in existing):
+  #   cfg.scene.sensors = existing + (_make_g1_terrain_scan_sensor(),)
 
   enable_corruption = not play
   cfg.observations = {
     "student": make_student_obs_group(
       enable_corruption=enable_corruption,
-      extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
+      # ---- height_scan DISABLED in student (user request) ----
+      # extra_terms={"height_scan": make_student_height_scan_term("terrain_scan")},
     ),
     "teacher_t": make_teacher_trackingbfm_obs_group(
       command_name="motion",
