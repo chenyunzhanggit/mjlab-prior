@@ -133,6 +133,12 @@ def _make_motion_prior_obs_group(
     terms=terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
+    # Auto-sanitize and log first occurrence per term. Catches edge cases
+    # like a degenerate raycast hit or a missing sensor frame so a single
+    # bad obs doesn't crash the downstream PPO with the std-NaN path
+    # through ``Normal.sample``.
+    nan_policy="warn",
+    nan_check_per_term=True,
   )
 
 
@@ -159,6 +165,8 @@ def _make_policy_obs_group(
     terms=terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
   )
 
 
@@ -185,6 +193,8 @@ def _make_critic_obs_group(
     terms=terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
   )
 
 

@@ -196,7 +196,13 @@ class DownStreamOnPolicyRunner:
     num_learning_iterations: int,
     init_at_random_ep_len: bool = False,
   ) -> None:
-    del init_at_random_ep_len
+    # Randomize starting episode lengths so env resets are desynchronized
+    # across the batch. Matches the reference
+    # ``motionprior/.../on_policy_runner_dt.py:120-124`` behavior.
+    if init_at_random_ep_len:
+      ep_buf = self.env.episode_length_buf
+      max_len = int(self.env.max_episode_length)
+      self.env.episode_length_buf = torch.randint_like(ep_buf, high=max_len)
     obs = self.env.get_observations()
 
     start_it = self.current_learning_iteration
@@ -205,11 +211,21 @@ class DownStreamOnPolicyRunner:
     end_it = start_it + num_learning_iterations
     for it in range(start_it, end_it):
       t0 = time.time()
-      obs = self._collect_rollout(obs)
+      # Rollout + return computation under ``inference_mode`` (matches
+      # the reference ``motionprior`` runner block 1:1). ``inference_mode``
+      # is stronger than ``no_grad``: tensors produced here are inference
+      # tensors with no autograd metadata, which avoids the
+      # ``Normal.sample`` ↔ view-of-Parameter interaction that surfaces
+      # as ``RuntimeError: normal expects all elements of std >= 0.0`` on
+      # some PyTorch 2.9 builds. The PPO update on the next line runs
+      # OUTSIDE inference_mode because it needs grad through the actor /
+      # critic / std parameters.
+      with torch.inference_mode():
+        obs = self._collect_rollout(obs)
+        self.alg.compute_returns(_t(obs, "critic"))
       collect_t = time.time() - t0
 
       t1 = time.time()
-      self.alg.compute_returns(_t(obs, "critic"))
       loss_dict = self.alg.update()
       learn_t = time.time() - t1
 
@@ -236,6 +252,10 @@ class DownStreamOnPolicyRunner:
   # ------------------------------------------------------------------ #
 
   def _collect_rollout(self, obs: TensorDict) -> TensorDict:
+    # Caller (``learn``) wraps the rollout + compute_returns in
+    # ``torch.inference_mode()`` to match the reference
+    # ``motionprior/.../on_policy_runner_dt.py`` pattern. Don't add a
+    # nested inference_mode here — nesting is allowed but pointless.
     for _ in range(self.num_steps_per_env):
       policy_obs = _t(obs, "policy")
       prop_obs = _t(obs, "motion_prior_obs")

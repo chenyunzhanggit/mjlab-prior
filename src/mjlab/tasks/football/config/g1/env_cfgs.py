@@ -94,11 +94,18 @@ def _make_football_obs_groups(
   * ``policy``: task-specific terms first, then proprio history.
   * ``critic``: same as policy + privileged ``base_lin_vel`` + the caller's
     privileged extras (e.g. ball_absolute_position).
+
+  All three groups carry ``nan_policy="warn"`` so that any degenerate
+  obs term (zero-quat at the very first reset, raycast miss on a freshly
+  spawned env, etc.) is logged once and replaced with zeros instead of
+  crashing the downstream PPO with a ``normal expects std >= 0`` error.
   """
   motion_prior_obs = _make_motion_prior_obs_group(
     enable_corruption=enable_corruption,
     with_height_scan=with_height_scan,
   )
+  # ``nan_policy`` is baked into the helper now; football's policy / critic
+  # groups (built inline below) set it explicitly.
 
   policy_terms: dict[str, ObservationTermCfg] = {
     **policy_extra_terms,
@@ -108,6 +115,8 @@ def _make_football_obs_groups(
     terms=policy_terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
   )
 
   critic_terms: dict[str, ObservationTermCfg] = {
@@ -122,6 +131,8 @@ def _make_football_obs_groups(
     terms=critic_terms,
     concatenate_terms=True,
     enable_corruption=False,
+    nan_policy="warn",
+    nan_check_per_term=True,
   )
 
   return {

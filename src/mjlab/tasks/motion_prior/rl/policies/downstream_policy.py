@@ -174,7 +174,13 @@ class DownStreamPolicy(nn.Module):
 
   def update_distribution(self, policy_obs: torch.Tensor) -> None:
     actor_mean = self.actor(policy_obs)
-    std = self.std.expand_as(actor_mean)
+    # Defensive sanitization, see ``DownStreamVQPolicy.update_distribution``.
+    # nan_to_num swallows NaN/Inf in actor outputs (caused by stale history
+    # slots on first reset or pathological sensor readings); clamp(min=1e-6)
+    # keeps the torch.normal kernel's ``std >= 0`` check from tripping after
+    # a PPO step accidentally drives ``self.std`` below zero.
+    actor_mean = torch.nan_to_num(actor_mean, nan=0.0, posinf=1.0e3, neginf=-1.0e3)
+    std = self.std.expand_as(actor_mean).clamp(min=1.0e-6)
     self.distribution = Normal(actor_mean, std)
 
   def act(
