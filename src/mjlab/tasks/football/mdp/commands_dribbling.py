@@ -47,40 +47,18 @@ class DribblingGoalCommand(CommandTerm):
     return self.goal_pos[:, :2]
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
-    """Sample a goal in env-local frame, offset by current robot pos.
+    """No-op. Goal placement is owned by ``reset_ball_along_line_dribbling``
+    (an EventTerm). mjlab's reset order runs ``event_manager.apply`` BEFORE
+    ``command_manager.reset``, so if this method actually wrote goal_pos it
+    would always read ``robot.data.root_link_pos_w`` BEFORE sim.forward()
+    propagates the event's new pose — stale value, wrong goal.
 
-    Rejection-samples until each env's offset >= ``min_distance``.
-    Capped at 100 attempts to avoid infinite loops for degenerate ranges.
+    Letting the event own both robot pose and goal_pos avoids that race
+    and matches how the reference ``G1KickingEnv._reset_scene_along_line``
+    handles it.
     """
-    r = len(env_ids)
-    if r == 0:
-      return
-
-    ranges = self.cfg.goal_ranges
-    robot_pos = self.robot.data.root_link_pos_w[env_ids]
-
-    goal_x = torch.zeros(r, device=self.device)
-    goal_y = torch.zeros(r, device=self.device)
-    valid = torch.zeros(r, dtype=torch.bool, device=self.device)
-
-    for _ in range(100):
-      remaining = ~valid
-      if not remaining.any():
-        break
-      n = int(remaining.sum().item())
-      new_x = torch.rand(n, device=self.device) * (ranges.x[1] - ranges.x[0]) + ranges.x[0]
-      new_y = torch.rand(n, device=self.device) * (ranges.y[1] - ranges.y[0]) + ranges.y[0]
-      ok = torch.sqrt(new_x**2 + new_y**2) >= ranges.min_distance
-      # Absolute coords for the satisfied subset.
-      abs_x = robot_pos[remaining, 0] + new_x
-      abs_y = robot_pos[remaining, 1] + new_y
-      goal_x[remaining] = torch.where(ok, abs_x, goal_x[remaining])
-      goal_y[remaining] = torch.where(ok, abs_y, goal_y[remaining])
-      valid[remaining] = valid[remaining] | ok
-
-    self.goal_pos[env_ids, 0] = goal_x
-    self.goal_pos[env_ids, 1] = goal_y
-    self.goal_pos[env_ids, 2] = 0.0
+    # Timer is reset by the base ``CommandTerm._resample`` wrapper; no
+    # additional work needed here.
 
   def _update_command(self) -> None:
     pass

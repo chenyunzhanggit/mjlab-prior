@@ -15,14 +15,10 @@ Layout per task (see reference for context):
   position (3-6m ahead with ±0.3m lateral offset) moving toward robot at
   5-9 m/s (the speed range comes from the command cfg).
 
-The robot is teleported using ``write_root_link_pose_to_sim``; the ball
-state is written via ``write_joint_state_to_sim`` (3 slide positions + 3
-hinge zeros, plus the matching velocity vector).
-
-Robot joints / actuator state are NOT reset here — that's expected to be
-covered by the standard ``reset_robot_joints`` event already on the
-inherited flat-velocity env. Only the floating base of the robot, and
-the ball's joints, are touched.
+Both the robot floating base and the ball (single freejoint) are written
+via ``write_root_state_to_sim`` / ``write_root_link_pose_to_sim``. Robot
+joints are reset elsewhere (the velocity env's ``reset_robot_joints``
+event).
 """
 
 from __future__ import annotations
@@ -33,7 +29,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.entity import Entity
-from mjlab.tasks.football.soccer_ball import BALL_JOINT_NAMES
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 if TYPE_CHECKING:
@@ -44,18 +39,6 @@ def _resolve_env_ids(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> to
   if env_ids is None:
     return torch.arange(env.num_envs, device=env.device, dtype=torch.long)
   return env_ids.to(torch.long)
-
-
-def _resolve_ball_joint_ids(env: ManagerBasedRlEnv, ball_name: str) -> torch.Tensor:
-  """Cache & return the ball's 6 joint indices (slide x/y/z, hinge x/y/z)."""
-  ball: Entity = env.scene[ball_name]
-  key = f"_ball_joint_ids_{ball_name}"
-  ids = getattr(env, key, None)
-  if ids is None:
-    ids, _names = ball.find_joints(list(BALL_JOINT_NAMES), preserve_order=True)
-    ids = torch.as_tensor(ids, device=env.device, dtype=torch.long)
-    setattr(env, key, ids)
-  return ids
 
 
 def _write_robot_pose(
@@ -86,21 +69,24 @@ def _write_ball_state(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor,
   pos_w: torch.Tensor,        # (n, 3)
-  vel_w: torch.Tensor | None, # (n, 3) or None
+  vel_w: torch.Tensor | None, # (n, 3) world-frame linear velocity, or None
   ball_name: str,
 ) -> None:
-  """Write the ball's 6-joint state from a desired world pos / linear vel."""
-  ball: Entity = env.scene[ball_name]
-  joint_ids = _resolve_ball_joint_ids(env, ball_name)
+  """Write the ball's 13-dim root state (pos + identity quat + lin/ang vel).
 
+  Uses ``write_root_state_to_sim`` which targets the freejoint's
+  qpos / qvel addresses directly — the standard mjlab floating-base API.
+  """
+  ball: Entity = env.scene[ball_name]
   n = pos_w.shape[0]
-  # qpos: 3 slides = world x/y/z, 3 hinges = 0.
-  qpos = torch.zeros(n, 6, device=env.device)
-  qpos[:, 0:3] = pos_w
-  qvel = torch.zeros(n, 6, device=env.device)
+  root_state = torch.zeros(n, 13, device=env.device)
+  root_state[:, 0:3] = pos_w        # position
+  root_state[:, 3] = 1.0            # quat w (identity)
+  # 4:7 already zero (quat x/y/z)
   if vel_w is not None:
-    qvel[:, 0:3] = vel_w
-  ball.write_joint_state_to_sim(qpos, qvel, joint_ids=joint_ids, env_ids=env_ids)
+    root_state[:, 7:10] = vel_w     # linear velocity (world frame)
+  # 10:13 already zero (angular velocity)
+  ball.write_root_state_to_sim(root_state, env_ids=env_ids)
 
 
 # ---------------------------------------------------------------------------

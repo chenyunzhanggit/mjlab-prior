@@ -325,6 +325,13 @@ def unitree_g1_dribbling_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   cfg.terminations = {
+    # Reset any env whose physics state goes NaN/Inf (e.g. due to a
+    # pathological ball↔robot contact). Without this, ``bad_orientation``
+    # sees NaN and returns False (NaN comparisons are False), and the env
+    # stays a zombie until time_out — polluting the rollout with NaNs.
+    # Must be first so the reset happens before reward / metric collection
+    # reads NaN state.
+    "nan_detection": TerminationTermCfg(func=envs_mdp.nan_detection),
     "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
     "base_orientation": TerminationTermCfg(
       func=envs_mdp.bad_orientation,
@@ -522,6 +529,8 @@ def unitree_g1_kicking_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   cfg.terminations = {
+    # NaN sentinel — see dribbling_env_cfg for rationale.
+    "nan_detection": TerminationTermCfg(func=envs_mdp.nan_detection),
     "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
     "base_orientation": TerminationTermCfg(
       func=envs_mdp.bad_orientation,
@@ -664,6 +673,10 @@ def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   cfg.terminations = {
+    # NaN sentinel — see dribbling_env_cfg for rationale. Passing is
+    # the task most prone to NaN because the ball arrives at the robot
+    # with 5–9 m/s and the impact can produce singular contact configs.
+    "nan_detection": TerminationTermCfg(func=envs_mdp.nan_detection),
     "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
     "base_orientation": TerminationTermCfg(
       func=envs_mdp.bad_orientation,
