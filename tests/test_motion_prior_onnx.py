@@ -29,20 +29,15 @@ from mjlab.tasks.motion_prior.rl.policies import (
   MotionPriorVQPolicy,
 )
 
-TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
+from _motion_prior_helpers import DEFAULT_DEPTH_SHAPE, teacher_ckpts_or_skip
 
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4
 NUM_ACTIONS = 29
 B = 4
 
 
-def _ckpts_or_skip() -> tuple[Path, Path]:
-  if not TEACHER_A_CKPT.is_file():
-    pytest.skip(f"teacher_a checkpoint missing: {TEACHER_A_CKPT}")
-  if not TEACHER_B_CKPT.is_file():
-    pytest.skip(f"teacher_b checkpoint missing: {TEACHER_B_CKPT}")
-  return TEACHER_A_CKPT, TEACHER_B_CKPT
+def _ckpts_or_skip():
+  return teacher_ckpts_or_skip()
 
 
 @pytest.fixture(scope="module")
@@ -98,10 +93,11 @@ def test_build_deploy_rejects_other_types() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_vae_deploy_input_is_prop_obs_only(vae_policy) -> None:
+def test_vae_deploy_input_is_prop_obs_and_depth(vae_policy) -> None:
   m = MotionPriorVAEDeployModel(vae_policy)
   prop = torch.randn(B, PROP_OBS_DIM)
-  out = m(prop)
+  depth = torch.randn(B, *DEFAULT_DEPTH_SHAPE)
+  out = m(prop, depth)
   assert out.shape == (B, NUM_ACTIONS)
   # Module owns deepcopies — should not be sharing storage with the
   # original parameters (so saving the ONNX after further training of
@@ -114,10 +110,11 @@ def test_vae_deploy_input_is_prop_obs_only(vae_policy) -> None:
     assert p_src.data_ptr() != p_dst.data_ptr()
 
 
-def test_vq_deploy_input_is_prop_obs_only(vq_policy) -> None:
+def test_vq_deploy_input_is_prop_obs_and_depth(vq_policy) -> None:
   m = MotionPriorVQDeployModel(vq_policy)
   prop = torch.randn(B, PROP_OBS_DIM)
-  out = m(prop)
+  depth = torch.randn(B, *DEFAULT_DEPTH_SHAPE)
+  out = m(prop, depth)
   assert out.shape == (B, NUM_ACTIONS)
 
 
@@ -134,12 +131,14 @@ def _check_onnx_parity(
   assert out.is_file()
 
   deploy = build_deploy_model(policy).to("cpu").eval()
-  prop = torch.randn(B, PROP_OBS_DIM, generator=torch.Generator().manual_seed(0))
+  gen = torch.Generator().manual_seed(0)
+  prop = torch.randn(B, PROP_OBS_DIM, generator=gen)
+  depth = torch.randn(B, *DEFAULT_DEPTH_SHAPE, generator=gen)
   with torch.no_grad():
-    torch_out = deploy(prop).cpu().numpy()
+    torch_out = deploy(prop, depth).cpu().numpy()
 
   sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
-  ort_out = sess.run(None, {"prop_obs": prop.numpy()})[0]
+  ort_out = sess.run(None, {"prop_obs": prop.numpy(), "depth": depth.numpy()})[0]
   np.testing.assert_allclose(torch_out, ort_out, atol=1e-5, rtol=1e-5)
 
 
@@ -171,6 +170,7 @@ class _FakeFlatEnv:
         "student": torch.randn(self.num_envs, PROP_OBS_DIM),
         "teacher_a": torch.randn(self.num_envs, 166),
         "teacher_a_history": torch.randn(self.num_envs, 10, 166),
+        "depth": torch.randn(self.num_envs, *DEFAULT_DEPTH_SHAPE),
       },
       batch_size=[self.num_envs],
     )
@@ -225,7 +225,7 @@ def test_inference_policy_auto_picks_encoder_a_when_teacher_a_in_obs(
     calls.append("encoder_a")
     return torch.zeros(prop.shape[0], NUM_ACTIONS)
 
-  def _spy_b(prop, tb_obs):
+  def _spy_b(prop, depth):
     calls.append("encoder_b")
     return torch.zeros(prop.shape[0], NUM_ACTIONS)
 
@@ -247,9 +247,10 @@ def test_inference_policy_explicit_deploy_path(monkeypatch, tmp_path: Path) -> N
   action = policy(obs)
   assert action.shape == (runner.env.num_envs, NUM_ACTIONS)
 
-  # Path 3 must also work without teacher groups.
+  # Path 3 must also work without teacher groups (still needs depth).
   obs_no_teacher = TensorDict(
-    {"student": obs["student"]}, batch_size=[runner.env.num_envs]
+    {"student": obs["student"], "depth": obs["depth"]},
+    batch_size=[runner.env.num_envs],
   )
   action_again = policy(obs_no_teacher)
   assert action_again.shape == (runner.env.num_envs, NUM_ACTIONS)
@@ -274,7 +275,10 @@ def test_inference_policy_auto_falls_back_to_deploy(
 
   policy = runner.get_inference_policy()
   obs = TensorDict(
-    {"student": torch.randn(runner.env.num_envs, PROP_OBS_DIM)},
+    {
+      "student": torch.randn(runner.env.num_envs, PROP_OBS_DIM),
+      "depth": torch.randn(runner.env.num_envs, *DEFAULT_DEPTH_SHAPE),
+    },
     batch_size=[runner.env.num_envs],
   )
   action = policy(obs)
@@ -324,6 +328,11 @@ def test_runner_export_policy_to_onnx(monkeypatch, tmp_path: Path) -> None:
   runner.export_policy_to_onnx(str(onnx_path))
   assert onnx_path.is_file()
   sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+  input_names = {i.name for i in sess.get_inputs()}
+  assert input_names == {"prop_obs", "depth"}, (
+    f"deploy ONNX should take prop_obs + depth, got inputs={input_names}"
+  )
   prop = np.random.randn(2, PROP_OBS_DIM).astype(np.float32)
-  out = sess.run(None, {"prop_obs": prop})[0]
+  depth = np.random.randn(2, *DEFAULT_DEPTH_SHAPE).astype(np.float32)
+  out = sess.run(None, {"prop_obs": prop, "depth": depth})[0]
   assert out.shape == (2, NUM_ACTIONS)

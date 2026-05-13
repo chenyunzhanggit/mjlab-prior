@@ -23,14 +23,40 @@ from mjlab.tasks.motion_prior.onnx import (
 )
 from mjlab.tasks.motion_prior.rl.policies import DownStreamVQPolicy
 from mjlab.tasks.motion_prior.rl.policies.quantizer import EMAQuantizer
+from mjlab.rl.cnn_proj import CNNWithProjection
+
+from _motion_prior_helpers import DEFAULT_DEPTH_SHAPE
 
 PROP = 559
 NUM_CODE = 64
 CODE_DIM = 16
+DEPTH_LATENT_DIM = 128
 NUM_ACTIONS = 29
 NUM_OBS = PROP + 3
 NUM_PRIV = NUM_OBS + 3
 B = 4
+
+
+_DEFAULT_DEPTH_CNN_CFG = {
+  "output_channels": [32, 64, 128],
+  "kernel_size": [5, 3, 3],
+  "stride": [2, 2, 2],
+  "padding": "none",
+  "activation": "elu",
+  "max_pool": False,
+  "global_pool": "avg",
+}
+
+
+def _make_depth_cnn() -> CNNWithProjection:
+  cnn_channels, cnn_h, cnn_w = DEFAULT_DEPTH_SHAPE
+  return CNNWithProjection(
+    input_dim=(cnn_h, cnn_w),
+    input_channels=cnn_channels,
+    proj_dim=DEPTH_LATENT_DIM,
+    proj_activation="elu",
+    **_DEFAULT_DEPTH_CNN_CFG,
+  )
 
 
 @pytest.fixture(scope="module")
@@ -39,12 +65,16 @@ def fake_vq_ckpt(tmp_path_factory: pytest.TempPathFactory) -> Path:
   ckpt_dir = tmp_path_factory.mktemp("vq_ckpt")
   ckpt_path = ckpt_dir / "fake_vq.pt"
 
-  motion_prior = MLP(PROP, CODE_DIM, hidden_dims=(64, 32), activation="elu")
+  depth_cnn = _make_depth_cnn()
+  motion_prior = MLP(
+    PROP + DEPTH_LATENT_DIM, CODE_DIM, hidden_dims=(64, 32), activation="elu"
+  )
   decoder = MLP(PROP + CODE_DIM, NUM_ACTIONS, hidden_dims=(64, 32), activation="elu")
   quantizer = EMAQuantizer(num_code=NUM_CODE, code_dim=CODE_DIM)
 
   torch.save(
     {
+      "depth_cnn": depth_cnn.state_dict(),
       "motion_prior": motion_prior.state_dict(),
       "decoder": decoder.state_dict(),
       "quantizer": quantizer.state_dict(),
@@ -92,12 +122,14 @@ def test_vq_trainable_modules_are_trainable(vq_policy: DownStreamVQPolicy) -> No
   assert vq_policy.std.requires_grad
 
 
-def test_vq_act_returns_pair(vq_policy: DownStreamVQPolicy) -> None:
+def test_vq_act_returns_triple(vq_policy: DownStreamVQPolicy) -> None:
   po = torch.randn(B, NUM_OBS)
   pr = torch.randn(B, PROP)
-  recons, raw = vq_policy.act(po, pr)
+  d = torch.randn(B, *DEFAULT_DEPTH_SHAPE)
+  recons, raw, depth_latent = vq_policy.act(po, pr, d)
   assert recons.shape == (B, NUM_ACTIONS)
   assert raw.shape == (B, CODE_DIM)
+  assert depth_latent.shape == (B, DEPTH_LATENT_DIM)
 
 
 def test_vq_grad_only_flows_to_trainable(vq_policy: DownStreamVQPolicy) -> None:
@@ -105,7 +137,8 @@ def test_vq_grad_only_flows_to_trainable(vq_policy: DownStreamVQPolicy) -> None:
   po = torch.randn(B, NUM_OBS)
   pr = torch.randn(B, PROP)
   cr = torch.randn(B, NUM_PRIV)
-  _, raw = vq_policy.act(po, pr)
+  d = torch.randn(B, *DEFAULT_DEPTH_SHAPE)
+  _, raw, _ = vq_policy.act(po, pr, d)
   loss = vq_policy.get_actions_log_prob(raw).sum() + vq_policy.evaluate(cr).sum()
   loss.backward()
 
@@ -166,6 +199,7 @@ class _FakeEnv:
         "policy": torch.randn(4, NUM_OBS),
         "motion_prior_obs": torch.randn(4, PROP),
         "critic": torch.randn(4, NUM_PRIV),
+        "depth": torch.randn(4, *DEFAULT_DEPTH_SHAPE),
       },
       batch_size=[4],
     )
@@ -234,9 +268,13 @@ def test_vq_combined_onnx_matches_pytorch(
   gen = torch.Generator().manual_seed(7)
   prop = torch.randn(B, PROP, generator=gen)
   pol = torch.randn(B, NUM_OBS, generator=gen)
+  depth = torch.randn(B, *DEFAULT_DEPTH_SHAPE, generator=gen)
   with torch.no_grad():
-    torch_out = m(prop, pol).cpu().numpy()
+    torch_out = m(prop, depth, pol).cpu().numpy()
 
   sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
-  ort_out = sess.run(None, {"prop_obs": prop.numpy(), "policy_obs": pol.numpy()})[0]
+  ort_out = sess.run(
+    None,
+    {"prop_obs": prop.numpy(), "depth": depth.numpy(), "policy_obs": pol.numpy()},
+  )[0]
   np.testing.assert_allclose(torch_out, ort_out, atol=1e-5, rtol=1e-5)

@@ -6,8 +6,6 @@ Policy-level tests skip cleanly if the teacher checkpoints are missing.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -20,22 +18,13 @@ from mjlab.tasks.motion_prior.teacher import (
   VELOCITY_TEACHER_CFG,
 )
 
-TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
+from _motion_prior_helpers import DEFAULT_DEPTH_SHAPE, teacher_ckpts_or_skip
 
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4
 NUM_ACTIONS = 29
 NUM_CODE = 64
 CODE_DIM = 16
 B = 8
-
-
-def _ckpts_or_skip() -> tuple[Path, Path]:
-  if not TEACHER_A_CKPT.is_file():
-    pytest.skip(f"teacher_a checkpoint missing: {TEACHER_A_CKPT}")
-  if not TEACHER_B_CKPT.is_file():
-    pytest.skip(f"teacher_b checkpoint missing: {TEACHER_B_CKPT}")
-  return TEACHER_A_CKPT, TEACHER_B_CKPT
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +81,7 @@ def test_quantizer_straight_through_grad_flows_to_input() -> None:
 
 @pytest.fixture(scope="module")
 def vq_policy() -> MotionPriorVQPolicy:
-  a, b = _ckpts_or_skip()
+  a, b = teacher_ckpts_or_skip()
   return MotionPriorVQPolicy(
     prop_obs_dim=PROP_OBS_DIM,
     num_actions=NUM_ACTIONS,
@@ -120,12 +109,19 @@ def dummy_batch() -> dict[str, torch.Tensor]:
       generator=gen,
     ),
     "teacher_b": torch.randn(B, VELOCITY_TEACHER_CFG.actor_obs_dim, generator=gen),
+    "teacher_b_height": torch.randn(
+      B, *VELOCITY_TEACHER_CFG.height_obs_dim, generator=gen
+    ),
+    "depth": torch.randn(B, *DEFAULT_DEPTH_SHAPE, generator=gen),
   }
 
 
 def test_vq_forward_a_shapes(vq_policy, dummy_batch) -> None:
   act, q, enc, mp_code, commit, ppl = vq_policy.forward_a(
-    dummy_batch["prop"], dummy_batch["teacher_a"], training=True
+    dummy_batch["prop"],
+    dummy_batch["teacher_a"],
+    dummy_batch["depth"],
+    training=True,
   )
   assert act.shape == (B, NUM_ACTIONS)
   assert q.shape == (B, CODE_DIM)
@@ -137,7 +133,10 @@ def test_vq_forward_a_shapes(vq_policy, dummy_batch) -> None:
 
 def test_vq_forward_b_shapes(vq_policy, dummy_batch) -> None:
   act, q, enc, mp_code, commit, ppl = vq_policy.forward_b(
-    dummy_batch["prop"], dummy_batch["teacher_b"], training=True
+    dummy_batch["prop"],
+    dummy_batch["teacher_b"],
+    dummy_batch["depth"],
+    training=True,
   )
   assert act.shape == (B, NUM_ACTIONS)
   assert q.shape == (B, CODE_DIM)
@@ -149,17 +148,23 @@ def test_vq_forward_b_shapes(vq_policy, dummy_batch) -> None:
 
 def test_vq_inference_paths_have_no_commit_loss(vq_policy, dummy_batch) -> None:
   act_a, _, _, _, ca, _ = vq_policy.forward_a(
-    dummy_batch["prop"], dummy_batch["teacher_a"], training=False
+    dummy_batch["prop"],
+    dummy_batch["teacher_a"],
+    dummy_batch["depth"],
+    training=False,
   )
   act_b, _, _, _, cb, _ = vq_policy.forward_b(
-    dummy_batch["prop"], dummy_batch["teacher_b"], training=False
+    dummy_batch["prop"],
+    dummy_batch["teacher_b"],
+    dummy_batch["depth"],
+    training=False,
   )
   assert act_a.shape == (B, NUM_ACTIONS)
   assert act_b.shape == (B, NUM_ACTIONS)
   assert ca is None and cb is None
   # policy_inference convenience wrappers must agree.
   pa = vq_policy.policy_inference_a(dummy_batch["prop"], dummy_batch["teacher_a"])
-  pb = vq_policy.policy_inference_b(dummy_batch["prop"], dummy_batch["teacher_b"])
+  pb = vq_policy.policy_inference_b(dummy_batch["prop"], dummy_batch["depth"])
   assert pa.shape == pb.shape == (B, NUM_ACTIONS)
 
 
@@ -176,7 +181,9 @@ def test_vq_evaluate_outputs_no_grad(vq_policy, dummy_batch) -> None:
   act_a = vq_policy.evaluate_a(
     dummy_batch["teacher_a"], dummy_batch["teacher_a_history"]
   )
-  act_b = vq_policy.evaluate_b(dummy_batch["teacher_b"])
+  act_b = vq_policy.evaluate_b(
+    dummy_batch["teacher_b"], dummy_batch["teacher_b_height"]
+  )
   assert act_a.shape == (B, NUM_ACTIONS)
   assert act_b.shape == (B, NUM_ACTIONS)
   assert not act_a.requires_grad
@@ -186,10 +193,16 @@ def test_vq_evaluate_outputs_no_grad(vq_policy, dummy_batch) -> None:
 def test_vq_backward_only_updates_trainable_modules(vq_policy, dummy_batch) -> None:
   vq_policy.zero_grad()
   act_a, _, _, _, _, _ = vq_policy.forward_a(
-    dummy_batch["prop"], dummy_batch["teacher_a"], training=True
+    dummy_batch["prop"],
+    dummy_batch["teacher_a"],
+    dummy_batch["depth"],
+    training=True,
   )
   act_b, _, _, _, _, _ = vq_policy.forward_b(
-    dummy_batch["prop"], dummy_batch["teacher_b"], training=True
+    dummy_batch["prop"],
+    dummy_batch["teacher_b"],
+    dummy_batch["depth"],
+    training=True,
   )
   target = torch.zeros_like(act_a)
   ((act_a - target).pow(2).mean() + (act_b - target).pow(2).mean()).backward()
@@ -202,6 +215,8 @@ def test_vq_backward_only_updates_trainable_modules(vq_policy, dummy_batch) -> N
   for name, p in vq_policy.encoder_b.named_parameters():
     assert p.grad is not None and p.grad.abs().sum() > 0, name
   for name, p in vq_policy.decoder.named_parameters():
+    assert p.grad is not None and p.grad.abs().sum() > 0, name
+  for name, p in vq_policy.depth_cnn.named_parameters():
     assert p.grad is not None and p.grad.abs().sum() > 0, name
 
 

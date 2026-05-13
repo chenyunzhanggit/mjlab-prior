@@ -11,8 +11,6 @@ Mirrors ``test_motion_prior_algorithm.py`` for the VQ branch:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -26,8 +24,7 @@ from mjlab.tasks.motion_prior.teacher import (
   VELOCITY_TEACHER_CFG,
 )
 
-TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
+from _motion_prior_helpers import DEFAULT_DEPTH_SHAPE, teacher_ckpts_or_skip
 
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4
 NUM_ACTIONS = 29
@@ -38,12 +35,8 @@ SEQ_LEN = 6
 B = NUM_ENVS * SEQ_LEN
 
 
-def _ckpts_or_skip() -> tuple[Path, Path]:
-  if not TEACHER_A_CKPT.is_file():
-    pytest.skip(f"teacher_a checkpoint missing: {TEACHER_A_CKPT}")
-  if not TEACHER_B_CKPT.is_file():
-    pytest.skip(f"teacher_b checkpoint missing: {TEACHER_B_CKPT}")
-  return TEACHER_A_CKPT, TEACHER_B_CKPT
+def _ckpts_or_skip():
+  return teacher_ckpts_or_skip()
 
 
 @pytest.fixture(scope="module")
@@ -76,16 +69,19 @@ def _make_batch(algo: DistillationMotionPriorVQ, seed: int = 0) -> dict:
     generator=gen,
   )
   tb_obs = torch.randn(B, VELOCITY_TEACHER_CFG.actor_obs_dim, generator=gen)
+  tb_height = torch.randn(B, *VELOCITY_TEACHER_CFG.height_obs_dim, generator=gen)
+  depth_a = torch.randn(B, *DEFAULT_DEPTH_SHAPE, generator=gen)
+  depth_b = torch.randn(B, *DEFAULT_DEPTH_SHAPE, generator=gen)
 
   sa_a, q_a, enc_a, mp_a, commit_a, ppl_a = algo.policy.forward_a(
-    prop_a, ta_obs, training=True
+    prop_a, ta_obs, depth_a, training=True
   )
   sa_b, q_b, enc_b, mp_b, commit_b, ppl_b = algo.policy.forward_b(
-    prop_b, tb_obs, training=True
+    prop_b, tb_obs, depth_b, training=True
   )
   with torch.no_grad():
     teacher_a_act = algo.policy.evaluate_a(ta_obs, ta_hist)
-    teacher_b_act = algo.policy.evaluate_b(tb_obs)
+    teacher_b_act = algo.policy.evaluate_b(tb_obs, tb_height)
 
   enc_a_time = enc_a.view(NUM_ENVS, SEQ_LEN, CODE_DIM)
   enc_b_time = enc_b.view(NUM_ENVS, SEQ_LEN, CODE_DIM)

@@ -21,19 +21,14 @@ from mjlab.tasks.motion_prior.teacher import (
   VELOCITY_TEACHER_CFG,
 )
 
-TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
+from _motion_prior_helpers import DEFAULT_DEPTH_SHAPE, teacher_ckpts_or_skip
 
 PROP_OBS_DIM = (3 + 3 + 29 + 29 + 29) * 4
 NUM_ACTIONS = 29
 
 
-def _ckpts_or_skip() -> tuple[Path, Path]:
-  if not TEACHER_A_CKPT.is_file():
-    pytest.skip(f"teacher_a checkpoint missing: {TEACHER_A_CKPT}")
-  if not TEACHER_B_CKPT.is_file():
-    pytest.skip(f"teacher_b checkpoint missing: {TEACHER_B_CKPT}")
-  return TEACHER_A_CKPT, TEACHER_B_CKPT
+def _ckpts_or_skip():
+  return teacher_ckpts_or_skip()
 
 
 class _FakeVecEnv:
@@ -110,6 +105,7 @@ def fake_envs(monkeypatch) -> tuple[_FakeVecEnv, _FakeVecEnv]:
         TELEOPIT_TEACHER_CFG.actor_history_length,
         TELEOPIT_TEACHER_CFG.actor_history_obs_dim,
       ),
+      "depth": DEFAULT_DEPTH_SHAPE,
     },
   )
   rough = _FakeVecEnv(
@@ -117,6 +113,8 @@ def fake_envs(monkeypatch) -> tuple[_FakeVecEnv, _FakeVecEnv]:
     group_shapes={
       "student": (PROP_OBS_DIM,),
       "teacher_b": (VELOCITY_TEACHER_CFG.actor_obs_dim,),
+      "teacher_b_height": VELOCITY_TEACHER_CFG.height_obs_dim,
+      "depth": DEFAULT_DEPTH_SHAPE,
     },
   )
 

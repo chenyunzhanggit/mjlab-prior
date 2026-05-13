@@ -17,8 +17,8 @@
 set -euo pipefail
 
 # ---- override via env vars or edit defaults below ----
-RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/2026-05-12_15-53-21}"
-CKPT="${CKPT:-model_0.pt}"
+RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/H100/}"
+CKPT="${CKPT:-model_3500.pt}"
 TASK="${TASK:-Mjlab-MotionPrior-VQ-Flat-Unitree-G1}"
 MOTION_PATH="${MOTION_PATH:-/home/lenovo/g1_retargeted_data/npz/Data10k/}"
 MOTION_TYPE="${MOTION_TYPE:-isaaclab}"

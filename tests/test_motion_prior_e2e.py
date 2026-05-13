@@ -28,25 +28,22 @@ def _t(td: TensorDict, key: str) -> torch.Tensor:
   return cast(torch.Tensor, td[key])
 
 
-TEACHER_A_CKPT = Path("~/project/Teleopit/track.pt").expanduser()
-TEACHER_B_CKPT = Path("~/project/mjlab-prior/logs/model_21000.pt").expanduser()
+from _motion_prior_helpers import teacher_ckpts_or_skip
+
 MOTION_FILE = Path("~/zcy/Teleopit/data/one_motion_for_debug.npz").expanduser()
 
 
-def _requires_e2e() -> None:
+def _requires_e2e() -> tuple[Path, Path]:
   if not torch.cuda.is_available():
     pytest.skip("e2e smoke needs CUDA")
-  if not TEACHER_A_CKPT.is_file():
-    pytest.skip(f"teacher_a ckpt missing: {TEACHER_A_CKPT}")
-  if not TEACHER_B_CKPT.is_file():
-    pytest.skip(f"teacher_b ckpt missing: {TEACHER_B_CKPT}")
   if not MOTION_FILE.is_file():
     pytest.skip(f"motion file missing: {MOTION_FILE}")
+  return teacher_ckpts_or_skip()
 
 
 @pytest.mark.slow
 def test_dual_env_distillation_smoke(tmp_path: Path) -> None:
-  _requires_e2e()
+  teacher_a_ckpt, teacher_b_ckpt = _requires_e2e()
   # Defer heavy imports until after the skips fire.
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
@@ -91,8 +88,8 @@ def test_dual_env_distillation_smoke(tmp_path: Path) -> None:
     save_interval=10,
     secondary_task_id="Mjlab-MotionPrior-Rough-Unitree-G1",
     secondary_num_envs=num_envs,
-    teacher_a_policy_path=str(TEACHER_A_CKPT),
-    teacher_b_policy_path=str(TEACHER_B_CKPT),
+    teacher_a_policy_path=str(teacher_a_ckpt),
+    teacher_b_policy_path=str(teacher_b_ckpt),
     policy=RslRlMotionPriorPolicyCfg(latent_z_dims=32),
     algorithm=RslRlMotionPriorAlgoCfg(
       num_learning_epochs=2,
@@ -138,9 +135,7 @@ def test_dual_env_distillation_smoke(tmp_path: Path) -> None:
     sa_a = runner.policy.policy_inference_a(
       _t(obs_a, "student"), _t(obs_a, "teacher_a")
     )
-    sa_b = runner.policy.policy_inference_b(
-      _t(obs_b, "student"), _t(obs_b, "teacher_b")
-    )
+    sa_b = runner.policy.policy_inference_b(_t(obs_b, "student"), _t(obs_b, "depth"))
   assert torch.isfinite(sa_a).all(), "non-finite student action on flat env"
   assert torch.isfinite(sa_b).all(), "non-finite student action on rough env"
   assert math.isfinite(sa_a.abs().mean().item())
