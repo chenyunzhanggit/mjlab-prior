@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
-from mjlab.envs.mdp import dr as envs_dr
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import (
   ObservationGroupCfg,
@@ -170,13 +169,25 @@ def _add_soccer_ball(
   cfg: ManagerBasedRlEnvCfg,
   params: SoccerBallParams,
 ) -> None:
-  """Add the soccer ball entity, contact sensor, and damping startup event.
+  """Add the soccer ball entity and its contact sensor to the scene.
 
-  Damping isn't set inside the MjSpec (the python ``MjsJoint.damping``
-  setter has a brittle version-dependent shape contract). Instead a
-  ``mode="startup"`` event uses mjlab's domain-randomization helper to
-  write ``dof_damping[ball_freejoint]`` deterministically with a
-  zero-width range. ``operation="abs"`` overwrites any default value.
+  Damping is intentionally NOT applied at present:
+
+  * Setting ``MjsJoint.damping`` on a freejoint at MjSpec build time hits
+    a version-dependent shape contract in the mujoco python binding
+    (some builds want an ``ndarray[(3, 1)]``, others a scalar), and
+  * ``dr.dof_damping`` cannot target freejoints because mjlab's
+    ``Entity.joint_names`` deliberately excludes the freejoint, so a
+    ``joint_names=".*"`` ``SceneEntityCfg`` resolves to an empty list.
+
+  Net effect: ``params.linear_damping`` / ``params.angular_damping`` are
+  accepted for API parity but currently dropped. Ball deceleration is
+  driven by ground friction + rolling resistance only. If the resulting
+  ball behavior is too "slippery", we'll add a custom event function
+  that writes ``mj_model.dof_damping`` at the freejoint's DOF addresses
+  directly (the standard mjlab DR helpers can't express this today).
+  ``params.radius`` / ``params.mass`` / ``params.rgba`` are still used
+  for ball geometry / appearance.
   """
   cfg.scene.entities = {
     **cfg.scene.entities,
@@ -187,20 +198,6 @@ def _add_soccer_ball(
   cfg.scene.sensors = (
     *(cfg.scene.sensors or ()),
     _make_ball_contact_sensor_cfg(robot_foot_geoms),
-  )
-
-  # Set ball joint damping post-compile via a zero-width DR range.
-  # ``use_address=True`` (inside ``dr.dof_damping``) expands the single
-  # freejoint into its 6 underlying DOF addresses, so the same scalar
-  # value is written to all 6.
-  cfg.events["ball_damping"] = EventTermCfg(
-    func=envs_dr.dof_damping,
-    mode="startup",
-    params={
-      "asset_cfg": SceneEntityCfg(_BALL_ENTITY, joint_names=(".*",)),
-      "operation": "abs",
-      "ranges": (params.linear_damping, params.linear_damping),
-    },
   )
 
 
