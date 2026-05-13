@@ -484,13 +484,29 @@ class MotionPriorOnPolicyRunner:
   def export_policy_to_onnx(
     self, path: str, filename: str | None = None, verbose: bool = False
   ) -> None:
-    """Export Path 3 (prop_obs → motion_prior → decoder → action) to ONNX."""
+    """Export Path 3 (prop_obs → motion_prior → decoder → action) to ONNX.
+
+    For VQ policies, additionally writes a ``*_dual.onnx`` sibling file with
+    the dual-branch wrapper (tracking + locomotion + ``mode`` flag) so the
+    on-board controller can switch paths via a button without retraining.
+    """
     from mjlab.tasks.motion_prior.onnx import export_motion_prior_to_onnx
+    from mjlab.tasks.motion_prior.rl.policies.motion_prior_vq_policy import (
+      MotionPriorVQPolicy,
+    )
 
     output = Path(path)
     if filename is not None:
       output = output / filename
     export_motion_prior_to_onnx(self.policy, output, verbose=verbose)
+    if isinstance(self.policy, MotionPriorVQPolicy):
+      dual_output = output.with_name(output.stem + "_dual" + output.suffix)
+      try:
+        export_motion_prior_to_onnx(
+          self.policy, dual_output, verbose=verbose, dual_branch=True
+        )
+      except Exception as e:
+        print(f"[MotionPrior] dual-branch ONNX export failed: {e}")
 
   def get_inference_policy(
     self,
@@ -679,6 +695,7 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
       device=device,
     )
     self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
+    self.num_mini_batches = max(1, int(algo_cfg.get("num_mini_batches", 1)))
 
   def _policy_step_actions(
     self, obs_a: TensorDict, obs_b: TensorDict
@@ -705,52 +722,95 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     rollout: dict[str, torch.Tensor],
     cur_iter_num: int,
   ) -> dict[str, float]:
-    """Re-forward VQ trainable modules and apply one optimization step."""
-    n_envs_a = self.env.num_envs
-    n_envs_b = self.env_b.num_envs
+    """Re-forward VQ trainable modules and apply one optimization step.
+
+    Splits the rollout into ``num_mini_batches`` chunks along the env axis;
+    each chunk does its own forward+backward+step, cutting peak activation
+    memory ~N×. The chunk uses contiguous env indices so the AR(1) reshape
+    ``view(chunk_envs, T, Z)`` stays valid (env-major layout from
+    ``stack(dim=1).flatten(0, 1)`` in ``_rollout``).
+    """
     T = self.num_steps_per_env
     Z = self._latent_z_dims  # = code_dim for VQ
+    n_a = self.env.num_envs
+    n_b = self.env_b.num_envs
+    M = self.num_mini_batches
+    # ceil division so the last chunk catches any remainder.
+    chunk_a = max(1, (n_a + M - 1) // M)
+    chunk_b = max(1, (n_b + M - 1) // M)
 
-    sa_a, q_a, enc_a, mp_code_a, commit_a, perplexity_a = self.policy.forward_a(
-      rollout["prop_obs_a"],
-      rollout["teacher_a_obs"],
-      rollout["depth_a"],
-      training=True,
-    )
-    sa_b, q_b, enc_b, mp_code_b, commit_b, perplexity_b = self.policy.forward_b(
-      rollout["prop_obs_b"],
-      rollout["teacher_b_obs"],
-      rollout["depth_b"],
-      training=True,
-    )
-    # ``training=True`` always produces a real commit_loss tensor.
-    assert commit_a is not None and commit_b is not None
+    # Reshape flat (n_envs*T, ...) rollouts back to (n_envs, T, ...) so we
+    # can slice along env without breaking the AR(1) view.
+    def _to_envT(x: torch.Tensor, n_envs: int) -> torch.Tensor:
+      return x.view(n_envs, T, *x.shape[1:])
 
-    # AR(1) on raw (pre-quantization) encoder outputs.
-    enc_a_t = enc_a.view(n_envs_a, T, Z)
-    enc_b_t = enc_b.view(n_envs_b, T, Z)
+    pa_envT = {
+      k: _to_envT(rollout[k], n_a)
+      for k in ("prop_obs_a", "teacher_a_obs", "depth_a", "actions_teacher_a")
+    }
+    pb_envT = {
+      k: _to_envT(rollout[k], n_b)
+      for k in ("prop_obs_b", "teacher_b_obs", "depth_b", "actions_teacher_b")
+    }
+    prog_a = rollout["progress_buf_a"]  # already (n_envs_a, T, 1)
+    prog_b = rollout["progress_buf_b"]  # already (n_envs_b, T, 1)
 
-    return self.alg.compute_loss_one_batch(
-      actions_teacher_a=rollout["actions_teacher_a"],
-      actions_student_a=sa_a,
-      enc_a=enc_a,
-      q_a=q_a,
-      mp_code_a=mp_code_a,
-      commit_a=commit_a,
-      perplexity_a=perplexity_a,
-      enc_a_time_stack=enc_a_t,
-      progress_buf_a=rollout["progress_buf_a"],
-      actions_teacher_b=rollout["actions_teacher_b"],
-      actions_student_b=sa_b,
-      enc_b=enc_b,
-      q_b=q_b,
-      mp_code_b=mp_code_b,
-      commit_b=commit_b,
-      perplexity_b=perplexity_b,
-      enc_b_time_stack=enc_b_t,
-      progress_buf_b=rollout["progress_buf_b"],
-      cur_iter_num=cur_iter_num,
-    )
+    accum: dict[str, float] = {}
+    n_steps = 0
+    for i in range(M):
+      sa = slice(i * chunk_a, min((i + 1) * chunk_a, n_a))
+      sb = slice(i * chunk_b, min((i + 1) * chunk_b, n_b))
+      ca = sa.stop - sa.start
+      cb = sb.stop - sb.start
+      if ca == 0 or cb == 0:
+        continue
+
+      def _flat(x: torch.Tensor) -> torch.Tensor:
+        return x.flatten(0, 1)
+
+      sa_a, q_a, enc_a, mp_code_a, commit_a, perplexity_a = self.policy.forward_a(
+        _flat(pa_envT["prop_obs_a"][sa]),
+        _flat(pa_envT["teacher_a_obs"][sa]),
+        _flat(pa_envT["depth_a"][sa]),
+        training=True,
+      )
+      sa_b, q_b, enc_b, mp_code_b, commit_b, perplexity_b = self.policy.forward_b(
+        _flat(pb_envT["prop_obs_b"][sb]),
+        _flat(pb_envT["teacher_b_obs"][sb]),
+        _flat(pb_envT["depth_b"][sb]),
+        training=True,
+      )
+      assert commit_a is not None and commit_b is not None
+
+      enc_a_t = enc_a.view(ca, T, Z)
+      enc_b_t = enc_b.view(cb, T, Z)
+
+      step_log = self.alg.compute_loss_one_batch(
+        actions_teacher_a=_flat(pa_envT["actions_teacher_a"][sa]),
+        actions_student_a=sa_a,
+        enc_a=enc_a,
+        q_a=q_a,
+        mp_code_a=mp_code_a,
+        commit_a=commit_a,
+        perplexity_a=perplexity_a,
+        enc_a_time_stack=enc_a_t,
+        progress_buf_a=prog_a[sa],
+        actions_teacher_b=_flat(pb_envT["actions_teacher_b"][sb]),
+        actions_student_b=sa_b,
+        enc_b=enc_b,
+        q_b=q_b,
+        mp_code_b=mp_code_b,
+        commit_b=commit_b,
+        perplexity_b=perplexity_b,
+        enc_b_time_stack=enc_b_t,
+        progress_buf_b=prog_b[sb],
+        cur_iter_num=cur_iter_num,
+      )
+      for k, v in step_log.items():
+        accum[k] = accum.get(k, 0.0) + v
+      n_steps += 1
+
+    return {k: v / max(1, n_steps) for k, v in accum.items()}
 
   def _log_iteration(
     self,

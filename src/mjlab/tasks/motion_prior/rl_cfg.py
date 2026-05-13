@@ -99,6 +99,10 @@ class RslRlMotionPriorVQAlgoCfg:
   learning_rate: float = 1.0e-3
   max_grad_norm: float | None = None
   num_learning_epochs: int = 5
+  num_mini_batches: int = 4
+  """Split each epoch's rollout into N mini-batches along the env axis.
+  N=1 keeps the legacy whole-batch update (highest peak GPU memory);
+  N=4 typically cuts activation memory ~4x with no accuracy loss."""
 
   behavior_weight_a: float = 1.0
   behavior_weight_b: float = 1.0

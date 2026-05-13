@@ -101,13 +101,92 @@ class MotionPriorVQDeployModel(nn.Module):
     )
 
 
+class MotionPriorVQDualBranchDeployModel(nn.Module):
+  """Dual-branch deploy wrapper for the VQ motion-prior student.
+
+  Exposes both teacher paths in a single ONNX file. A runtime ``mode`` flag
+  picks between tracking (encoder_a) and locomotion (motion_prior head)::
+
+      mode == 1 (tracking):
+          z = encoder_a(teacher_a_obs)
+      mode == 0 (locomotion):
+          z = motion_prior([prop, depth_cnn(depth)])
+
+      q = quantizer.dequantize(quantizer.quantize(z))    # shared codebook
+      action = decoder([prop, q])
+
+  Both paths route through the same shared codebook + decoder, matching the
+  training-time forward_a / forward_b semantics. ``teacher_a_obs`` must be
+  the same 1D vector teacher_a consumes during distillation (e.g. 166-dim
+  for the G1 Teleopit teacher: proprio + motion-tracking command frames).
+  """
+
+  is_recurrent: bool = False
+  input_names = ("prop_obs", "depth", "teacher_a_obs", "mode")
+  output_names = ("actions",)
+
+  def __init__(self, policy: MotionPriorVQPolicy) -> None:
+    super().__init__()
+    self.depth_cnn = copy.deepcopy(policy.depth_cnn)
+    self.motion_prior = copy.deepcopy(policy.motion_prior)
+    self.encoder_a = copy.deepcopy(policy.encoder_a)
+    self.quantizer = copy.deepcopy(policy.quantizer)
+    self.decoder = copy.deepcopy(policy.decoder)
+    self.prop_obs_dim = policy.prop_obs_dim
+    self.depth_shape = policy.depth_shape
+    self.teacher_a_obs_dim = policy.teacher_a_cfg.actor_obs_dim
+    self.num_actions = policy.num_actions
+    self.eval()
+
+  def forward(
+    self,
+    prop_obs: torch.Tensor,
+    depth: torch.Tensor,
+    teacher_a_obs: torch.Tensor,
+    mode: torch.Tensor,
+  ) -> torch.Tensor:
+    depth_latent = self.depth_cnn(depth)
+    z_loco = self.motion_prior(torch.cat([prop_obs, depth_latent], dim=-1))
+    z_track = self.encoder_a(teacher_a_obs)
+    # mode is broadcast as [B, 1] float in {0., 1.}; tracking when >= 0.5.
+    use_track = (mode >= 0.5).to(z_loco.dtype)
+    z = use_track * z_track + (1.0 - use_track) * z_loco
+    code_idx = self.quantizer.quantize(z)
+    q = self.quantizer.dequantize(code_idx)
+    return self.decoder(torch.cat([prop_obs, q], dim=-1))
+
+  def get_dummy_inputs(
+    self,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+      torch.zeros(1, self.prop_obs_dim),
+      torch.zeros(1, *self.depth_shape),
+      torch.zeros(1, self.teacher_a_obs_dim),
+      torch.zeros(1, 1),
+    )
+
+
 def build_deploy_model(
   policy: MotionPriorPolicy | MotionPriorVQPolicy,
+  *,
+  dual_branch: bool = False,
 ) -> nn.Module:
-  """Pick the right deploy wrapper for the given policy."""
+  """Pick the right deploy wrapper for the given policy.
+
+  ``dual_branch=True`` exposes both tracking (encoder_a) and locomotion
+  (motion_prior) paths with a runtime ``mode`` flag. Only supported for
+  VQ policies — they share a single codebook so both paths can reuse the
+  same decoder cleanly.
+  """
   if isinstance(policy, MotionPriorVQPolicy):
+    if dual_branch:
+      return MotionPriorVQDualBranchDeployModel(policy)
     return MotionPriorVQDeployModel(policy)
   if isinstance(policy, MotionPriorPolicy):
+    if dual_branch:
+      raise NotImplementedError(
+        "Dual-branch deploy is only implemented for VQ motion-prior policies."
+      )
     return MotionPriorVAEDeployModel(policy)
   raise TypeError(f"Unsupported policy type for deploy export: {type(policy).__name__}")
 
@@ -117,15 +196,28 @@ def export_motion_prior_to_onnx(
   output_path: str | Path,
   *,
   verbose: bool = False,
+  dual_branch: bool = False,
 ) -> None:
-  """Export the deployable Path 3 student to ONNX.
+  """Export the deployable motion-prior student to ONNX.
 
-  Exported inputs: ``prop_obs`` (1D) and ``depth`` (4D, [B, C, H, W]).
+  Single-branch (default): inputs are ``prop_obs`` and ``depth``; only
+  the motion_prior (locomotion) head is exported.
+
+  ``dual_branch=True`` (VQ only): inputs are ``prop_obs``, ``depth``,
+  ``teacher_a_obs``, ``mode``. The deploy-time ``mode`` flag picks between
+  tracking (``mode>=0.5``, routes through ``encoder_a(teacher_a_obs)``)
+  and locomotion (``mode<0.5``, routes through ``motion_prior``); both
+  paths go through the shared codebook and decoder.
   """
   output_path = Path(output_path)
   os.makedirs(output_path.parent, exist_ok=True)
-  model = build_deploy_model(policy).to("cpu")
+  model = build_deploy_model(policy, dual_branch=dual_branch).to("cpu")
   model.eval()
+  input_names: tuple[str, ...] = model.input_names  # type: ignore[assignment]
+  output_names: tuple[str, ...] = model.output_names  # type: ignore[assignment]
+  dynamic_axes: dict[str, dict[int, str]] = {
+    name: {0: "batch"} for name in (*input_names, *output_names)
+  }
   torch.onnx.export(
     model,
     model.get_dummy_inputs(),  # type: ignore[operator]
@@ -133,13 +225,9 @@ def export_motion_prior_to_onnx(
     export_params=True,
     opset_version=18,
     verbose=verbose,
-    input_names=list(model.input_names),  # type: ignore[arg-type]
-    output_names=list(model.output_names),  # type: ignore[arg-type]
-    dynamic_axes={
-      "prop_obs": {0: "batch"},
-      "depth": {0: "batch"},
-      "actions": {0: "batch"},
-    },
+    input_names=list(input_names),
+    output_names=list(output_names),
+    dynamic_axes=dynamic_axes,
     dynamo=False,
   )
 
