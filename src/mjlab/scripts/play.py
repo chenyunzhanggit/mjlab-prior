@@ -77,6 +77,12 @@ class PlayConfig:
   """Override for single-encoder motion_prior runner's teacher checkpoint path
   (the trackingbfm teacher loaded inside ``MotionPriorSingleEncoderPolicy`` /
   ``MotionPriorSingleEncoderVQPolicy``)."""
+  motion_prior_ckpt_path: str | None = None
+  """Path to the frozen motion-prior backbone checkpoint for downstream
+  runners (``DownStreamOnPolicyRunner`` / ``DownStreamVQOnPolicyRunner``).
+  Equivalent to ``--agent.motion-prior-ckpt-path`` on the train CLI. If
+  unset, falls back to the ``MJLAB_MOTION_PRIOR_CKPT`` env var. Required
+  for all downstream tasks (velocity + football)."""
   inference_path: Literal["auto", "encoder", "encoder_a", "encoder_b", "deploy"] = (
     "auto"
   )
@@ -284,6 +290,12 @@ def run_play(task_id: str, cfg: PlayConfig):
       agent_cfg_dict["teacher_b_policy_path"] = cfg.teacher_b_policy_path
     if cfg.teacher_policy_path is not None:
       agent_cfg_dict["teacher_policy_path"] = cfg.teacher_policy_path
+    # ``DownStreamOnPolicyRunner`` reads ``motion_prior_ckpt_path`` from the
+    # agent cfg dict at __init__ (falls back to MJLAB_MOTION_PRIOR_CKPT env
+    # var when absent). Inject the CLI value here so downstream play runs
+    # don't need ``MJLAB_MOTION_PRIOR_CKPT=... uv run ...`` shell prefixes.
+    if cfg.motion_prior_ckpt_path is not None:
+      agent_cfg_dict["motion_prior_ckpt_path"] = cfg.motion_prior_ckpt_path
     runner = runner_cls(env, agent_cfg_dict, device=device)
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device

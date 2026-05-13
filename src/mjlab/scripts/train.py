@@ -42,6 +42,25 @@ class TrainConfig:
   """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
   gpu_ids: list[int] | Literal["all"] | None = field(default_factory=lambda: [0])
 
+  # ---------- Flat shortcuts (mirror common ``--env.*`` / ``--agent.*`` flags).
+  # tyro still exposes the full dataclass paths (e.g. ``--env.scene.num-envs``);
+  # these top-level aliases are syntactic sugar so the most common knobs can
+  # be set without descending into the nested cfg. Applied to the parsed
+  # ``env`` / ``agent`` cfgs at the top of ``run_train``.
+  num_envs: int | None = None
+  """Override for ``env.scene.num_envs``."""
+  motion_path: str | None = None
+  """Override for ``env.commands.motion.motion_path`` (multi-motion tasks)."""
+  motion_file: str | None = None
+  """Override for ``env.commands.motion.motion_file`` (single-motion tasks
+  or multi-motion tasks that point at a single .npz)."""
+  motion_type: Literal["isaaclab", "mujoco"] | None = None
+  """Override for ``env.commands.motion.motion_type`` (multi-motion tasks)."""
+  motion_prior_ckpt_path: str | None = None
+  """Override for ``agent.motion_prior_ckpt_path`` (downstream task runners)."""
+  run_name: str | None = None
+  """Override for ``agent.run_name`` (appended to the log dir's timestamp)."""
+
   @staticmethod
   def from_task(task_id: str) -> "TrainConfig":
     env_cfg = load_env_cfg(task_id)
@@ -68,6 +87,39 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   cfg.agent.seed = seed
   cfg.env.seed = seed
+
+  # Apply top-level flat shortcuts onto the nested cfg objects. Done here
+  # (rather than in ``from_task``) so explicit ``--env.*`` / ``--agent.*``
+  # flags still take precedence when both are provided — tyro fills the
+  # nested fields first, the flat ones land last.
+  if cfg.num_envs is not None:
+    cfg.env.scene.num_envs = cfg.num_envs
+  if cfg.run_name is not None:
+    cfg.agent.run_name = cfg.run_name
+  if cfg.motion_prior_ckpt_path is not None:
+    # Only DownStream* runner cfgs declare this field; other tasks ignore it.
+    if hasattr(cfg.agent, "motion_prior_ckpt_path"):
+      cfg.agent.motion_prior_ckpt_path = cfg.motion_prior_ckpt_path
+    else:
+      print(
+        "[WARN] --motion-prior-ckpt-path ignored: this task's agent cfg has"
+        " no motion_prior_ckpt_path field."
+      )
+  if any(
+    v is not None for v in (cfg.motion_path, cfg.motion_file, cfg.motion_type)
+  ):
+    motion_cmd_cfg = cfg.env.commands.get("motion") if cfg.env.commands else None
+    if motion_cmd_cfg is None:
+      print(
+        "[WARN] --motion-* flags ignored: this task has no 'motion' command."
+      )
+    else:
+      if cfg.motion_path is not None and hasattr(motion_cmd_cfg, "motion_path"):
+        motion_cmd_cfg.motion_path = cfg.motion_path
+      if cfg.motion_file is not None and hasattr(motion_cmd_cfg, "motion_file"):
+        motion_cmd_cfg.motion_file = cfg.motion_file
+      if cfg.motion_type is not None and hasattr(motion_cmd_cfg, "motion_type"):
+        motion_cmd_cfg.motion_type = cfg.motion_type
 
   print(f"[INFO] Training with: device={device}, seed={seed}, rank={rank}")
 
@@ -211,6 +263,13 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
 def launch_training(task_id: str, args: TrainConfig | None = None):
   args = args or TrainConfig.from_task(task_id)
+
+  # Apply ``--run-name`` shortcut here (rather than inside ``run_train``)
+  # because the log dir name below reads ``args.agent.run_name``. Other
+  # flat shortcuts (num-envs, motion-*, motion-prior-ckpt-path) only
+  # affect runtime cfg and stay in ``run_train``.
+  if args.run_name is not None:
+    args.agent.run_name = args.run_name
 
   # Create log directory once before launching workers.
   log_root_path = (Path(args.log_root) / args.agent.experiment_name).resolve()
