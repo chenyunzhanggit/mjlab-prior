@@ -19,11 +19,11 @@ set -euo pipefail
 # ---- override via env vars or edit defaults below ----
 RUN="${RUN:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_motion_prior_vq/2026-05-12_15-53-21}"
 CKPT="${CKPT:-model_0.pt}"
-TASK="${TASK:-Mjlab-MotionPrior-VQ-Rough-Unitree-G1}"
+TASK="${TASK:-Mjlab-MotionPrior-VQ-Flat-Unitree-G1}"
 MOTION_PATH="${MOTION_PATH:-/home/lenovo/g1_retargeted_data/npz/Data10k/}"
 MOTION_TYPE="${MOTION_TYPE:-isaaclab}"
 TEACHER_A="${TEACHER_A:-/home/lenovo/project/Teleopit/track.pt}"
-TEACHER_B="${TEACHER_B:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_velocity/2026-05-12_11-32-35/model_9000.pt}"
+TEACHER_B="${TEACHER_B:-/home/lenovo/project/mjlab_prior/logs/rsl_rl/g1_velocity/2026-05-12_16-45-12/model_9500.pt}"
 NUM_ENVS="${NUM_ENVS:-1}"
 # -------------------------------------------------------
 
