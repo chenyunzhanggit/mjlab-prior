@@ -250,18 +250,23 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   }
 
   # -------------------- Commands (velocity ranges) -------------------- #
-  # Reference's commented-out **training** ranges (the (0, 0) ranges in
+  # Training: reference's training ranges (the (0, 0) ranges in
   # ``g1_downstream_vq_cfg.py:103-104`` are a debug placeholder for
   # "stand still"; the line above them is what they actually train on).
+  #
+  # Play: force all three axes to zero so the auto-sampled command is
+  # always (0, 0, 0). The robot stands still by default; the operator
+  # then drives manually via the Viser joystick (Enable checkbox →
+  # slider values). See ``--viewer viser`` on play.py.
   twist_cmd = cfg.commands["twist"]
-  twist_cmd.ranges.lin_vel_x = (-1.0, 2.0)
-  twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
-  twist_cmd.ranges.ang_vel_z = (-3.14, 3.14)
-  # Quick "stand still" sanity-check sweep — flip these in place of the
-  # three lines above when debugging policy stability.
-  #   twist_cmd.ranges.lin_vel_x = (0.0, 0.0)
-  #   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
-  #   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+  if play:
+    twist_cmd.ranges.lin_vel_x = (0.0, 0.0)
+    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+  else:
+    twist_cmd.ranges.lin_vel_x = (-1.0, 2.0)
+    twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
+    twist_cmd.ranges.ang_vel_z = (-3.14, 3.14)
 
   # -------------------- RSI noise (reference parity) -------------------- #
   # Equivalent to reference's
