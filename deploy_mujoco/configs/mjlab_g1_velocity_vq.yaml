@@ -9,10 +9,10 @@
 
 # Frozen motion-prior backbone — must be a single-VQ ckpt
 # (top-level keys: motion_prior / decoder / quantizer / encoder / ...).
-motion_prior_ckpt_path: "/home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/CHANGE_ME/model_XXXX.pt"
+motion_prior_ckpt_path: "/home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/2026-05-13_18-18-49/model_1500.pt"
 
 # Trainable downstream actor / critic / std — DownStream VQ runner ckpt.
-downstream_ckpt_path:   "/home/dx/mjlab-prior/logs/rsl_rl/g1_downstream_vq_velocity/CHANGE_ME/model_XXXX.pt"
+downstream_ckpt_path:   "/home/dx/mjlab-prior/logs/rsl_rl/g1_downstream_vq_velocity/2026-05-13_18-43-17/model_75500.pt"
 
 # MuJoCo MJCF (29-DOF G1, joint order = MJCF order = mjlab's training order).
 xml_path: "../xml/g1_29dof.xml"
@@ -21,7 +21,7 @@ xml_path: "../xml/g1_29dof.xml"
 # step_dt = simulation_dt * control_decimation = 0.002 * 10 = 20 ms (50 Hz control)
 simulation_dt:      0.002
 control_decimation: 10
-render_decimation:  1     # render every N sim steps (>1 = faster display)
+render_decimation:  10     # render every N sim steps (>1 = faster display)
 
 # Inference device. "cpu" is fine for a single env.
 device: "cpu"
