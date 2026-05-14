@@ -157,3 +157,34 @@ def flat_orientation_l2(
   """Penalize non-flat base orientation."""
   asset: Entity = env.scene[asset_cfg.name]
   return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+
+
+def lin_vel_z_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize z-axis base linear velocity (bouncing). Matches IsaacLab /
+  unitree_rl_lab semantics."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+
+def ang_vel_xy_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize xy-axis base angular velocity (roll / pitch rate). Matches
+  IsaacLab / unitree_rl_lab semantics."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+
+
+def base_height_l2(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize deviation from a fixed base height target (world-frame z).
+  Matches IsaacLab / unitree_rl_lab semantics."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.square(asset.data.root_link_pos_w[:, 2] - target_height)

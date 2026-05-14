@@ -250,9 +250,8 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   }
 
   # -------------------- Commands (velocity ranges) -------------------- #
-  # Training: reference's training ranges (the (0, 0) ranges in
-  # ``g1_downstream_vq_cfg.py:103-104`` are a debug placeholder for
-  # "stand still"; the line above them is what they actually train on).
+  # Original training ranges (matching the reference cfg) — wide enough to
+  # cover meaningful walking and turning speeds.
   twist_cmd = cfg.commands["twist"]
   twist_cmd.ranges.lin_vel_x = (-1.0, 2.0)
   twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
@@ -290,40 +289,92 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   }
   cfg.events["reset_base"].params["velocity_range"] = _RSI_VELOCITY_RANGE
   cfg.events["reset_robot_joints"].params["position_range"] = (-0.1, 0.1)
+  # Joint velocity noise at reset — pushes the robot out of perfect
+  # static rest each episode, breaking the "stand still" local
+  # optimum during PPO exploration. This is the ONLY new addition vs
+  # the prior reference-parity setup; mirrors unitree_rl_lab's
+  # ``reset_robot_joints(velocity_range=(-1.0, 1.0))``.
+  cfg.events["reset_robot_joints"].params["velocity_range"] = (-1.0, 1.0)
 
-  # -------------------- Rewards (reference minimal set) -------------------- #
-  # Reference's ``track_lin_vel_xy_exp`` / ``track_ang_vel_z_exp`` map to
-  # mjlab-prior's ``track_linear_velocity`` / ``track_angular_velocity``
-  # (same exp(-err/std²) form, just renamed). ``undesired_contacts`` is
-  # implemented via mjlab-prior's ``self_collision_cost`` against the
-  # ``self_collision`` ContactSensor already on the velocity-flat scene.
+  # -------------------- Rewards (your minimal set + stability adds) ------- #
+  # Restored: explicit minimal reward dict (overwrites velocity env's set).
+  # On top of the 4 task-essential terms, we add the stability penalties
+  # you tried earlier but rebalanced so the policy doesn't degenerate into
+  # "stand still".
+  #
+  # Why this works without the "stand still" trap:
+  #   * tracking weight stays dominant (2.0), penalties are kept SMALL
+  #     so the gradient toward "track command" wins;
+  #   * action_rate_l2 / joint_torques_l2 / joint_acc_l2 are tiny weights —
+  #     they shape behavior to be smoother, not punish movement itself;
+  #   * flat_orientation_l2 / lin_vel_z_l2 / ang_vel_xy_l2 / base_height_l2
+  #     penalize ONLY off-task disturbances (bouncing / tilting / dropping
+  #     height), not in-plane walking velocity (which is on the X/Y axes,
+  #     not z; xy linear velocity is what tracking REWARDS).
+  #
+  # If you want to tone any term up/down without breaking walking:
+  #   * If robot still doesn't walk: lower the four stability weights
+  #     (flat_orientation_l2, lin_vel_z_l2, ang_vel_xy_l2, base_height_l2)
+  #     by 2-5x.
+  #   * If robot walks but is jerky / over-spins: raise action_rate_l2.
+  #   * If robot bobs vertically: raise lin_vel_z_l2.
   cfg.rewards = {
+    # -- Task -- #
     "track_lin_vel_xy_exp": RewardTermCfg(
       func=velocity_mdp.track_linear_velocity,
       weight=2.0,
-      params={"command_name": "twist", "std": 0.5},  # sqrt(0.25)
+      params={"command_name": "twist", "std": 0.5},
     ),
     "track_ang_vel_z_exp": RewardTermCfg(
       func=velocity_mdp.track_angular_velocity,
       weight=2.0,
       params={"command_name": "twist", "std": 0.5},
     ),
+    # -- Joint-limit hard cap -- #
     "joint_limit": RewardTermCfg(
       func=envs_mdp.joint_pos_limits,
       weight=-10.0,
       params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*",))},
     ),
+    # -- Self-collision soft cap -- #
     "undesired_contacts": RewardTermCfg(
       func=velocity_mdp.self_collision_cost,
       weight=-0.1,
-      params={
-        # ``self_collision`` sensor is registered on the velocity-flat scene
-        # (see ``velocity/config/g1/env_cfgs.py``); it watches pelvis-subtree
-        # contacts which covers the same body set reference's regex targeted
-        # (everything except the 4 expected contact bodies).
-        "sensor_name": "self_collision",
-        "force_threshold": 1.0,
-      },
+      params={"sensor_name": "self_collision", "force_threshold": 1.0},
+    ),
+    # -- Stability penalties (your additions, rebalanced) -- #
+    # Weights ~10x smaller than the reference unitree_rl_lab values so the
+    # tracking gradient still wins. Increase 2-5x if the policy walks but
+    # is unstable; decrease 2-5x if it refuses to walk.
+    "flat_orientation_l2": RewardTermCfg(
+      func=envs_mdp.flat_orientation_l2,
+      weight=-0.2,  # was -1.0 in your snippet
+    ),
+    "lin_vel_z_l2": RewardTermCfg(
+      func=envs_mdp.lin_vel_z_l2,
+      weight=-0.5,  # was -2.0
+    ),
+    "ang_vel_xy_l2": RewardTermCfg(
+      func=envs_mdp.ang_vel_xy_l2,
+      weight=-0.02,  # was -0.05
+    ),
+    "base_height_l2": RewardTermCfg(
+      func=envs_mdp.base_height_l2,
+      weight=-0.2,  # was -1.0
+      params={"target_height": 0.78},
+    ),
+    # -- Smoothness penalties (small weights, ok to keep) -- #
+    "action_rate_l2": RewardTermCfg(
+      func=envs_mdp.action_rate_l2,
+      weight=-0.01,  # same as your snippet
+    ),
+    "joint_torques_l2": RewardTermCfg(
+      func=envs_mdp.joint_torques_l2,
+      weight=-1.0e-5,
+    ),
+    "joint_acc_l2": RewardTermCfg(
+      func=envs_mdp.joint_acc_l2,
+      weight=-2.5e-7,
     ),
   }
 

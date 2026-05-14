@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from .commands_dribbling import DribblingGoalCommand, DribblingGoalCommandCfg
@@ -49,7 +50,7 @@ class KickingGoalCommand(DribblingGoalCommand):
       gx, gy, _gz = self.goal_pos[idx].cpu().numpy()
       # Centre of crossbar.
       visualizer.add_sphere(
-        center=(gx, gy, goal_h),
+        center=np.array([gx, gy, goal_h]),
         radius=0.12,
         color=(1.0, 1.0, 1.0, 0.9),
         label=f"kicking_goal_centre_{idx}",
@@ -57,13 +58,13 @@ class KickingGoalCommand(DribblingGoalCommand):
       # Posts as vertical "sphere stacks" — DebugVisualizer doesn't expose
       # cuboid; one sphere per post is enough for debugging.
       visualizer.add_sphere(
-        center=(gx, gy - half_w, goal_h / 2.0),
+        center=np.array([gx, gy - half_w, goal_h / 2.0]),
         radius=0.12,
         color=(1.0, 1.0, 1.0, 0.9),
         label=f"kicking_goal_left_{idx}",
       )
       visualizer.add_sphere(
-        center=(gx, gy + half_w, goal_h / 2.0),
+        center=np.array([gx, gy + half_w, goal_h / 2.0]),
         radius=0.12,
         color=(1.0, 1.0, 1.0, 0.9),
         label=f"kicking_goal_right_{idx}",
