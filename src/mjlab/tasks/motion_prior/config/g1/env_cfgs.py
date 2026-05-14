@@ -86,10 +86,12 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
   return NoisyGroupedRayCasterCameraCfg(
     name="camera",
     frame=ObjRef(type="body", name="pelvis", entity="robot"),
-    pattern=PinholeCameraPatternCfg(height=64, width=64, fovy=57.9),
+    pattern=PinholeCameraPatternCfg(
+      height=64, width=64, fovy=57.9
+    ),  # [TODO] fovy pending
     focal_length=1.0,
-    horizontal_aperture=2 * math.tan(math.radians(89.04) / 2),
-    vertical_aperture=2 * math.tan(math.radians(57.9) / 2),
+    horizontal_aperture=2 * math.tan(math.radians(89.04) / 2),  # [TODO] pending
+    vertical_aperture=2 * math.tan(math.radians(57.9) / 2),  # [TODO] pending
     data_types=["distance_to_image_plane"],
     ray_alignment="base",
     include_geom_groups=(0, 2),
@@ -97,11 +99,11 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
     depth_clipping_behavior="max",
     update_period=1 / 10,
     offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
-      pos=(0.15, 0.0, -0.05),
+      pos=(0.0487988662332928, 0.01, 0.4378029937970051),
       rot=(
-        math.cos(math.radians(0.5) / 2) * math.cos(math.radians(45) / 2),
-        math.sin(math.radians(0.5) / 2),
-        math.sin(math.radians(45) / 2),
+        0.9135367613482678,
+        0.004363309284746571,
+        0.4067366430758002,
         0.0,
       ),
       convention="world",

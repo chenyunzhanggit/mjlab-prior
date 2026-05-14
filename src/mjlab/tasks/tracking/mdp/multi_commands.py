@@ -195,6 +195,23 @@ _ISAACLAB_TO_MUJOCO_BODY_REINDEX = [
 ]
 
 
+def _peek_longest_motion_steps(motion_files: Sequence[str]) -> int:
+  """Return the largest ``joint_pos.shape[0]`` across ``motion_files``.
+
+  Uses ``np.load(..., mmap_mode='r')`` so headers are read without pulling
+  the full arrays into memory. Used pre-shard under multi-GPU so each rank
+  agrees on a global buffer length without needing torch.distributed (which
+  is not initialized yet when the env is constructed).
+  """
+  longest = 0
+  for path in motion_files:
+    with np.load(path, mmap_mode="r") as data:
+      n = int(data["joint_pos"].shape[0])
+    if n > longest:
+      longest = n
+  return longest
+
+
 def _expand_motion_dir(motion_path: str) -> list[str]:
   """Mirror ``play_mp.py:get_data10K_motion_files`` — recursive .npz glob.
 
@@ -371,6 +388,35 @@ class MultiMotionCommand(CommandTerm):
         "MultiMotionCommandCfg requires either motion_files or motion_path."
       )
 
+    # Multi-GPU motion sharding: each rank loads only its 1/world_size slice
+    # via round-robin so VRAM stays bounded as the dataset grows. The cfg's
+    # motion_files is rewritten to the local shard before MultiMotionLoader
+    # mmaps anything; per-rank seeds (set in train.py) already diversify
+    # sampling, and rsl_rl's DDP all-reduces gradients across ranks.
+    #
+    # ``_global_longest_motion_steps`` is computed from the full file list
+    # *before* sharding by mmap-peeking each npz header (no full load). This
+    # avoids relying on torch.distributed.all_reduce here -- the env is
+    # constructed before rsl_rl initializes the process group, so collectives
+    # are unavailable at this point. Stashing the global max on the cfg lets
+    # buffer shapes stay identical across ranks.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    if world_size > 1:
+      self._global_longest_motion_steps: int | None = _peek_longest_motion_steps(
+        cfg.motion_files
+      )
+      local_files = cfg.motion_files[rank::world_size]
+      if not local_files:
+        raise ValueError(
+          f"Rank {rank}/{world_size} got 0 motion files after round-robin "
+          f"sharding (total={len(cfg.motion_files)}). Reduce world_size or "
+          f"provide more clips."
+        )
+      cfg.motion_files = local_files
+    else:
+      self._global_longest_motion_steps = None
+
     super().__init__(cfg, env)
 
     self.robot: Entity = env.scene[cfg.entity_name]
@@ -393,8 +439,13 @@ class MultiMotionCommand(CommandTerm):
 
     # Buffer covers a full episode for the currently-assigned clip per env.
     # ``+1`` to make ``time_steps == buffer_start_time + buffer_length - 1``
-    # safe at episode end.
-    longest = int(self.motion.file_lengths.max().item())
+    # safe at episode end. Under multi-GPU sharding ``_global_longest_motion_steps``
+    # was pre-computed from the full file list so buffer shapes stay identical
+    # across ranks.
+    if self._global_longest_motion_steps is not None:
+      longest = self._global_longest_motion_steps
+    else:
+      longest = int(self.motion.file_lengths.max().item())
     self.buffer_length: int = int(min(env.max_episode_length, longest)) + 1
 
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
