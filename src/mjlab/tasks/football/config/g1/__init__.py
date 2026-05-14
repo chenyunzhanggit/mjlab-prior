@@ -4,10 +4,12 @@ from mjlab.tasks.football.config.g1.env_cfgs import (
   unitree_g1_dribbling_env_cfg,
   unitree_g1_kicking_env_cfg,
   unitree_g1_passing_env_cfg,
+  unitree_g1_passing_perception_env_cfg,
 )
 from mjlab.tasks.football.config.g1.rl_cfg import (
   unitree_g1_dribbling_vq_runner_cfg,
   unitree_g1_kicking_vq_runner_cfg,
+  unitree_g1_passing_perception_vq_runner_cfg,
   unitree_g1_passing_vq_runner_cfg,
 )
 from mjlab.tasks.motion_prior.rl import DownStreamVQOnPolicyRunner
@@ -41,5 +43,17 @@ register_mjlab_task(
   env_cfg=unitree_g1_passing_env_cfg(),
   play_env_cfg=unitree_g1_passing_env_cfg(play=True),
   rl_cfg=unitree_g1_passing_vq_runner_cfg(),
+  runner_cls=DownStreamVQOnPolicyRunner,
+)
+
+# Passing-Perception — same task as Passing but the policy cannot read
+# ball state directly. A 176-dim forward LiDAR depth scan replaces
+# ``ball_relative_position`` + ``ball_velocity`` in the policy obs.
+# Critic keeps the privileged ball state for asymmetric A2C training.
+register_mjlab_task(
+  task_id="Mjlab-Football-Passing-Perception-Unitree-G1",
+  env_cfg=unitree_g1_passing_perception_env_cfg(),
+  play_env_cfg=unitree_g1_passing_perception_env_cfg(play=True),
+  rl_cfg=unitree_g1_passing_perception_vq_runner_cfg(),
   runner_cls=DownStreamVQOnPolicyRunner,
 )

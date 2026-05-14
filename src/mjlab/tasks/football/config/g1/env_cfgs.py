@@ -34,7 +34,14 @@ from mjlab.managers.observation_manager import (
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.sensor import (
+  ContactMatch,
+  ContactSensorCfg,
+  GridPatternCfg,
+  ObjRef,
+  RayCastSensorCfg,
+)
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.tasks.football import mdp as football_mdp
 from mjlab.tasks.football.soccer_ball import (
   SOCCER_BALL_RADIUS,
@@ -46,6 +53,7 @@ from mjlab.tasks.motion_prior.config.g1.downstream_env_cfgs import (
   _make_proprio_terms,
 )
 from mjlab.tasks.motion_prior.config.g1.env_cfgs import _make_g1_terrain_scan_sensor
+from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.config.g1.env_cfgs import unitree_g1_flat_env_cfg
 
 # Soccer ball entity name (used by the ball entity, contact sensor secondary
@@ -553,6 +561,15 @@ def unitree_g1_kicking_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       weight=-10.0,
       params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*",))},
     ),
+    # Reference parity: ``undesired_contacts`` (-0.1) in motionprior's
+    # ``G1KickingRewardsCfg``. Penalises self-contacts on the robot so it
+    # doesn't learn to dribble/balance with non-foot body parts. Mirrors
+    # the downstream-velocity env (which uses the same sensor + weight).
+    "undesired_contacts": RewardTermCfg(
+      func=velocity_mdp.self_collision_cost,
+      weight=-0.1,
+      params={"sensor_name": "self_collision", "force_threshold": 1.0},
+    ),
   }
 
   cfg.terminations = {
@@ -584,6 +601,19 @@ def unitree_g1_kicking_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       "ball_radius": SOCCER_BALL_RADIUS,
     },
   )
+
+  # Reference parity: original motionprior ``g1_kicking_vq_cfg`` adds a
+  # ``motion`` command with ``joint_position_range=(-0.05, 0.05)`` whose
+  # only function on this task is RSI joint noise (init_from_motion=False,
+  # so the motion clip is never read for the robot's joints). We achieve
+  # the same effect by overriding the inherited velocity-env
+  # ``reset_robot_joints`` event ranges (it defaults to (0.0, 0.0), which
+  # gives **no** initial randomization and is the most likely cause of
+  # the policy collapsing into "circle around the ball, never strike").
+  # ``velocity_range=(-1.0, 1.0)`` matches the unitree_rl_lab joint
+  # velocity RSI noise we use on the velocity-tracking downstream task.
+  cfg.events["reset_robot_joints"].params["position_range"] = (-0.05, 0.05)
+  cfg.events["reset_robot_joints"].params["velocity_range"] = (-1.0, 1.0)
 
   return cfg
 
@@ -733,6 +763,132 @@ def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       "command_name": "passing_commands",
       "ball_radius": SOCCER_BALL_RADIUS,
     },
+  )
+
+  return cfg
+
+
+# ---------------------------------------------------------------------------
+# Passing — Perception-only variant
+# ---------------------------------------------------------------------------
+
+# Forward LiDAR sensor name. The policy reads its depth output via the
+# ``depth_image`` MDP term; the critic still gets privileged ball state.
+_PERCEPTION_SENSOR = "pelvis_forward_lidar"
+
+# Geometry: 16 × 11 grid of parallel rays sweeping a 1.5 m × 1.0 m virtual
+# scan plane in front of pelvis. resolution=0.1 → 176 rays (small enough
+# to keep the policy input tractable, dense enough to detect the 22 cm
+# soccer ball at 3–6 m).
+_PERCEPTION_GRID_SIZE = (1.5, 1.0)
+_PERCEPTION_GRID_RES = 0.1
+_PERCEPTION_MAX_DISTANCE = 5.0
+_PERCEPTION_NUM_RAYS = 176  # 16 × 11; sanity-checked in tests
+
+
+def _make_g1_forward_lidar_sensor() -> RayCastSensorCfg:
+  """Forward-facing LiDAR-style raycast on the G1 pelvis.
+
+  Rays are parallel along pelvis local +X (forward), arranged on a 1.5 m ×
+  1.0 m grid in the pelvis local YZ plane. With ``ray_alignment="base"``
+  the whole array rotates with the pelvis, so as the robot turns the
+  policy's depth image rotates with it — same semantics as a chest-mounted
+  multi-line LiDAR or stereo depth camera.
+
+  Why GridPattern instead of PinholeCamera: PinholeCameraPatternCfg
+  generates rays along the MuJoCo camera convention (-Z forward), which
+  would require adding a forward-rotated site to the G1 MJCF. GridPattern
+  + ``direction=(1, 0, 0)`` avoids touching the robot spec and gives the
+  same downstream-task signal (a "what's in front of me?" depth map).
+  """
+  return RayCastSensorCfg(
+    name=_PERCEPTION_SENSOR,
+    frame=ObjRef(type="body", name="pelvis", entity="robot"),
+    pattern=GridPatternCfg(
+      size=_PERCEPTION_GRID_SIZE,
+      resolution=_PERCEPTION_GRID_RES,
+      direction=(1.0, 0.0, 0.0),
+    ),
+    ray_alignment="base",
+    max_distance=_PERCEPTION_MAX_DISTANCE,
+    exclude_parent_body=True,
+    # Include all geom groups (0=terrain, 1=collision, 2=ball etc.). The
+    # ball geom is in the default group 0 of the soccer-ball spec, so it
+    # registers as a hit.
+    include_geom_groups=None,
+    debug_vis=False,  # Set True locally to inspect rays in viser.
+  )
+
+
+def unitree_g1_passing_perception_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Perception-only passing task.
+
+  Same physics / rewards / terminations / reset events as
+  :func:`unitree_g1_passing_env_cfg`, but the policy can no longer read
+  ball state directly. Instead it sees:
+
+  * ``passing_source_position`` — the task command ("kick the incoming ball
+    back to *this* location"), still in body frame. Necessary because the
+    target zone is part of the goal, not something the robot has to find.
+  * ``ball_depth_image`` — a flat 176-dim depth scan from a forward LiDAR
+    on the pelvis. The policy has to *infer* where the ball is from the
+    depth pattern, the same as a real robot would.
+
+  Critic obs are unchanged: ``ball_relative_position`` / ``ball_velocity``
+  / ``passing_source_position`` / ``ball_absolute_position`` (privileged).
+  This is the standard PPO asymmetric-actor-critic trick: the value
+  function gets oracle ball state for stable training, the policy
+  doesn't, so deployment behavior matches what the policy learnt.
+  """
+  cfg = unitree_g1_passing_env_cfg(play=play)
+
+  # Attach the forward LiDAR to the existing sensor tuple.
+  cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_forward_lidar_sensor())
+
+  enable_corruption = not play
+
+  # Rebuild observations: policy drops direct ball state, gains depth_image.
+  # Critic keeps privileged ball state for value-function learning.
+  cfg.observations = _make_football_obs_groups(
+    policy_extra_terms={
+      "passing_source_position": ObservationTermCfg(
+        func=football_mdp.passing_source_position,
+        params={"command_name": "passing_commands"},
+      ),
+      # 176-dim flat depth scan. ``scale=1/max_distance`` normalises into
+      # roughly [0, 1] so it plays nicely with the actor MLP (the
+      # downstream-VQ runner doesn't apply empirical normalisation).
+      # ``noise`` mimics depth-sensor jitter for sim2real robustness.
+      "ball_depth_image": ObservationTermCfg(
+        func=football_mdp.depth_image,
+        params={
+          "sensor_name": _PERCEPTION_SENSOR,
+          "scale": 1.0 / _PERCEPTION_MAX_DISTANCE,
+        },
+        noise=Unoise(n_min=-0.02, n_max=0.02),
+      ),
+    },
+    critic_extra_terms={
+      "ball_relative_position": ObservationTermCfg(
+        func=football_mdp.ball_relative_position,
+        params={"ball_name": _BALL_ENTITY, "asset_name": "robot"},
+      ),
+      "ball_velocity": ObservationTermCfg(
+        func=football_mdp.ball_velocity,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+      "passing_source_position": ObservationTermCfg(
+        func=football_mdp.passing_source_position,
+        params={"command_name": "passing_commands"},
+      ),
+      "ball_absolute_position": ObservationTermCfg(
+        func=football_mdp.ball_absolute_position,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+    },
+    enable_corruption=enable_corruption,
   )
 
   return cfg

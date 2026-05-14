@@ -43,3 +43,10 @@ def unitree_g1_kicking_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
 
 def unitree_g1_passing_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
   return _default_vq_runner_cfg("g1_football_passing_vq")
+
+
+def unitree_g1_passing_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
+  """Same PPO hyperparams as plain passing — the only diff is the env's
+  policy obs (depth image replaces direct ball state). The actor MLP
+  width (512/256/128) is plenty for a 176-dim depth input + proprio."""
+  return _default_vq_runner_cfg("g1_football_passing_perception_vq")

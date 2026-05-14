@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.entity import Entity
+from mjlab.sensor.raycast_sensor import RayCastSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
@@ -102,3 +103,36 @@ def passing_source_position(
   rel_3d = torch.cat([rel, torch.zeros(env.num_envs, 1, device=env.device)], dim=-1)
   rel_b = quat_apply_inverse(robot.data.root_link_quat_w, rel_3d)
   return torch.cat([rel_b[:, :2], dist], dim=-1)
+
+
+def depth_image(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  miss_value: float | None = None,
+  scale: float = 1.0,
+) -> torch.Tensor:
+  """Flattened depth image from a :class:`RayCastSensor`.
+
+  Returns the raw per-ray distances (metres) as a flat ``(num_envs, N)``
+  vector, where ``N = num_frames * num_rays_per_frame``. Miss rays
+  (``distance < 0`` from the raycaster) are clamped to ``miss_value``
+  (defaults to the sensor's ``max_distance``). The output is multiplied
+  by ``scale`` so the caller can normalise into ``[0, 1]`` for the
+  policy network if desired (e.g. ``scale=1/max_distance``).
+
+  Use with a :class:`PinholeCameraPatternCfg` raycast sensor to simulate
+  a forward-facing depth camera / LiDAR on a humanoid — the perception
+  signal we use to replace direct ball-state observations in the
+  perception-only passing task.
+  """
+  sensor: RayCastSensor = env.scene[sensor_name]
+  if miss_value is None:
+    miss_value = sensor.cfg.max_distance
+  distances = sensor.data.distances  # [B, N]
+  miss_mask = distances < 0
+  out = torch.where(
+    miss_mask, torch.full_like(distances, miss_value), distances
+  )
+  if scale != 1.0:
+    out = out * scale
+  return out
