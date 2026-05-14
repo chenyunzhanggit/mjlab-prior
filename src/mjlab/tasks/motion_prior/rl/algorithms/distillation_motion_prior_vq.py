@@ -68,12 +68,18 @@ class DistillationMotionPriorVQ:
     max_grad_norm: float | None = 1.0,
     loss_cfg: DistillationVQLossCfg | None = None,
     device: str | torch.device = "cpu",
+    multi_gpu_cfg: dict | None = None,
   ) -> None:
     self.policy = policy
     self.policy.to(device)
     self.device = device
     self.max_grad_norm = max_grad_norm
     self.loss_cfg = loss_cfg or DistillationVQLossCfg()
+
+    self._multi_gpu_cfg = multi_gpu_cfg
+    self._world_size = (
+      int(multi_gpu_cfg["world_size"]) if multi_gpu_cfg is not None else 1
+    )
 
     if self.loss_cfg.loss_type == "mse":
       self._behavior_loss_fn = nn.functional.mse_loss
@@ -82,8 +88,39 @@ class DistillationMotionPriorVQ:
     else:
       raise ValueError(f"Unknown loss_type: {self.loss_cfg.loss_type}")
 
-    trainable = [p for p in policy.parameters() if p.requires_grad]
-    self.optimizer = optim.Adam(trainable, lr=learning_rate)
+    self._trainable_params: list[torch.nn.Parameter] = [
+      p for p in policy.parameters() if p.requires_grad
+    ]
+    self.optimizer = optim.Adam(self._trainable_params, lr=learning_rate)
+
+    # Wire codebook EMA all-reduce: the EMAQuantizer's _update_codebook needs
+    # to know the world size + a callable to all-reduce its per-batch stats
+    # so each rank's EMA sees the global batch (otherwise codebooks diverge).
+    self._wire_codebook_sync()
+
+  def _wire_codebook_sync(self) -> None:
+    """Attach world_size to the policy's quantizer so its EMA update can
+    all-reduce ``code_sum_batch`` / ``code_count_batch`` across ranks.
+    No-op when single-GPU."""
+    q = getattr(self.policy, "quantizer", None)
+    if q is None:
+      return
+    q.set_distributed_world_size(self._world_size)
+
+  def _sync_gradients(self) -> None:
+    """Average ``param.grad`` across ranks. No-op when world_size == 1."""
+    if self._world_size <= 1:
+      return
+    grads = [p.grad for p in self._trainable_params if p.grad is not None]
+    if not grads:
+      return
+    flat = torch._utils._flatten_dense_tensors(grads)
+    torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.SUM)
+    flat.div_(self._world_size)
+    for buf, synced in zip(
+      grads, torch._utils._unflatten_dense_tensors(flat, grads), strict=True
+    ):
+      buf.copy_(synced)
 
   def _clipped_modules(self) -> list[nn.Module]:
     p = self.policy
@@ -150,6 +187,7 @@ class DistillationMotionPriorVQ:
 
     self.optimizer.zero_grad()
     total.backward()
+    self._sync_gradients()
     if self.max_grad_norm:
       for module in self._clipped_modules():
         nn.utils.clip_grad_norm_(module.parameters(), self.max_grad_norm)

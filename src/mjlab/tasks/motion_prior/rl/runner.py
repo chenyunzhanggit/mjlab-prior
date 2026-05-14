@@ -91,6 +91,11 @@ class MotionPriorOnPolicyRunner:
     self.log_dir = log_dir
     self.current_learning_iteration: int = 0
 
+    # ----- Multi-GPU setup (mirrors rsl_rl OnPolicyRunner) ----------------
+    # Must run before policy build so the algorithm can pick up the
+    # multi_gpu cfg and the codebook EMA can all-reduce.
+    self._configure_multi_gpu()
+
     # ----- Primary env (flat / motion-tracking, hosts teacher_a obs) -----
     # Duck-typed: anything that quacks like ``RslRlVecEnvWrapper``
     # (``get_observations``, ``step``, ``num_envs``, ``episode_length_buf``)
@@ -123,9 +128,13 @@ class MotionPriorOnPolicyRunner:
     self.save_interval = int(train_cfg.get("save_interval", 500))
     self.upload_model = bool(train_cfg.get("upload_model", False))
 
-    # ----- Optional SummaryWriter ----------------------------------------
+    # ----- Optional SummaryWriter (rank 0 only) ---------------------------
     self._writer = None
-    if log_dir is not None and train_cfg.get("logger", "tensorboard") == "tensorboard":
+    if (
+      log_dir is not None
+      and train_cfg.get("logger", "tensorboard") == "tensorboard"
+      and self.gpu_global_rank == 0
+    ):
       try:
         from torch.utils.tensorboard import SummaryWriter
 
@@ -142,6 +151,64 @@ class MotionPriorOnPolicyRunner:
     self._cur_len_a = torch.zeros(self.env.num_envs, device=device)
     self._cur_rew_b = torch.zeros(self.env_b.num_envs, device=device)
     self._cur_len_b = torch.zeros(self.env_b.num_envs, device=device)
+
+  # --------------------------------------------------------------------- #
+  # Multi-GPU plumbing                                                    #
+  # --------------------------------------------------------------------- #
+
+  def _configure_multi_gpu(self) -> None:
+    """Initialize torch.distributed when launched under torchrunx.
+
+    Mirrors ``rsl_rl.runners.OnPolicyRunner._configure_multi_gpu`` but
+    lives here because this runner does not subclass rsl_rl. After this
+    method returns, ``self.is_distributed`` / ``gpu_world_size`` /
+    ``gpu_global_rank`` / ``gpu_local_rank`` are set; in single-GPU mode
+    all four collapse to single-process defaults.
+    """
+    self.gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
+    self.is_distributed = self.gpu_world_size > 1
+
+    if not self.is_distributed:
+      self.gpu_local_rank = 0
+      self.gpu_global_rank = 0
+      self.cfg["multi_gpu"] = None
+      return
+
+    self.gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    self.gpu_global_rank = int(os.getenv("RANK", "0"))
+    self.cfg["multi_gpu"] = {
+      "global_rank": self.gpu_global_rank,
+      "local_rank": self.gpu_local_rank,
+      "world_size": self.gpu_world_size,
+    }
+
+    if self.device != f"cuda:{self.gpu_local_rank}":
+      raise ValueError(
+        f"Device '{self.device}' does not match expected device for local "
+        f"rank '{self.gpu_local_rank}'."
+      )
+
+    torch.distributed.init_process_group(
+      backend="nccl",
+      rank=self.gpu_global_rank,
+      world_size=self.gpu_world_size,
+    )
+    torch.cuda.set_device(self.gpu_local_rank)
+
+  def _broadcast_params(self) -> None:
+    """Broadcast trainable parameters + buffers from rank 0 to all ranks.
+
+    Per-rank seed diversification (train.py: seed += local_rank) means each
+    rank's policy was initialized with different weights. Without this, the
+    manual gradient all-reduce would average gradients computed on diverged
+    models, which is not what DDP semantics want.
+    """
+    if not self.is_distributed:
+      return
+    for p in self.policy.parameters():
+      torch.distributed.broadcast(p.data, src=0)
+    for b in self.policy.buffers():
+      torch.distributed.broadcast(b.data, src=0)
 
   # --------------------------------------------------------------------- #
   # Policy / algorithm construction (overridable by VQ subclass)          #
@@ -195,6 +262,7 @@ class MotionPriorOnPolicyRunner:
       max_grad_norm=algo_cfg.get("max_grad_norm", 1.0),
       loss_cfg=loss_cfg,
       device=device,
+      multi_gpu_cfg=self.cfg.get("multi_gpu"),
     )
     self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
 
@@ -212,6 +280,12 @@ class MotionPriorOnPolicyRunner:
     init_at_random_ep_len: bool = False,
   ) -> None:
     del init_at_random_ep_len  # both envs already RSI-randomize on reset.
+
+    # Sync policy weights across ranks (per-rank seeds initialize divergently).
+    if self.is_distributed:
+      print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
+      self._broadcast_params()
+
     obs_a = self.env.get_observations()
     obs_b = self.env_b.get_observations()
 
@@ -232,10 +306,14 @@ class MotionPriorOnPolicyRunner:
       self.current_learning_iteration = it
       self._log_iteration(it, loss_dict, collect_t, learn_t)
 
-      if self.log_dir is not None and it % self.save_interval == 0:
+      if (
+        self.log_dir is not None
+        and it % self.save_interval == 0
+        and self.gpu_global_rank == 0
+      ):
         self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
-    if self.log_dir is not None:
+    if self.log_dir is not None and self.gpu_global_rank == 0:
       self.save(
         os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt")
       )
@@ -421,18 +499,19 @@ class MotionPriorOnPolicyRunner:
     rew_b = statistics.fmean(self._rew_buf_b) if self._rew_buf_b else 0.0
     len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
     len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
-      f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
-      f"kl_a={loss_dict.get('loss/kl_a', 0):.4f} "
-      f"kl_b={loss_dict.get('loss/kl_b', 0):.4f} "
-      f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
-      f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
-      f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
-      f"len_a={len_a:.0f} len_b={len_b:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
-    )
+    if self.gpu_global_rank == 0:
+      print(
+        f"[it {it}] "
+        f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
+        f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
+        f"kl_a={loss_dict.get('loss/kl_a', 0):.4f} "
+        f"kl_b={loss_dict.get('loss/kl_b', 0):.4f} "
+        f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
+        f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
+        f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
+        f"len_a={len_a:.0f} len_b={len_b:.0f} "
+        f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+      )
     if self._writer is not None:
       for k, v in loss_dict.items():
         self._writer.add_scalar(k, v, it)
@@ -693,6 +772,7 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
       max_grad_norm=algo_cfg.get("max_grad_norm", None),
       loss_cfg=loss_cfg,
       device=device,
+      multi_gpu_cfg=self.cfg.get("multi_gpu"),
     )
     self.num_learning_epochs = int(algo_cfg.get("num_learning_epochs", 5))
     self.num_mini_batches = max(1, int(algo_cfg.get("num_mini_batches", 1)))
@@ -824,21 +904,22 @@ class MotionPriorVQOnPolicyRunner(MotionPriorOnPolicyRunner):
     rew_b = statistics.fmean(self._rew_buf_b) if self._rew_buf_b else 0.0
     len_a = statistics.fmean(self._len_buf_a) if self._len_buf_a else 0.0
     len_b = statistics.fmean(self._len_buf_b) if self._len_buf_b else 0.0
-    print(
-      f"[it {it}] "
-      f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
-      f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
-      f"commit_a={loss_dict.get('loss/commit_a', 0):.4f} "
-      f"commit_b={loss_dict.get('loss/commit_b', 0):.4f} "
-      f"mp={loss_dict.get('loss/mp', 0):.4f} "
-      f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
-      f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
-      f"perp_a={loss_dict.get('perplexity_a', 0):.1f} "
-      f"perp_b={loss_dict.get('perplexity_b', 0):.1f} "
-      f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
-      f"len_a={len_a:.0f} len_b={len_b:.0f} "
-      f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
-    )
+    if self.gpu_global_rank == 0:
+      print(
+        f"[it {it}] "
+        f"behavior_a={loss_dict.get('loss/behavior_a', 0):.4f} "
+        f"behavior_b={loss_dict.get('loss/behavior_b', 0):.4f} "
+        f"commit_a={loss_dict.get('loss/commit_a', 0):.4f} "
+        f"commit_b={loss_dict.get('loss/commit_b', 0):.4f} "
+        f"mp={loss_dict.get('loss/mp', 0):.4f} "
+        f"ar1_a={loss_dict.get('loss/ar1_a', 0):.4f} "
+        f"ar1_b={loss_dict.get('loss/ar1_b', 0):.4f} "
+        f"perp_a={loss_dict.get('perplexity_a', 0):.1f} "
+        f"perp_b={loss_dict.get('perplexity_b', 0):.1f} "
+        f"rew_a={rew_a:.2f} rew_b={rew_b:.2f} "
+        f"len_a={len_a:.0f} len_b={len_b:.0f} "
+        f"t_collect={collect_t:.2f}s t_learn={learn_t:.2f}s"
+      )
     if self._writer is not None:
       for k, v in loss_dict.items():
         self._writer.add_scalar(k, v, it)

@@ -51,6 +51,20 @@ class EMAQuantizer(nn.Module):
     self.register_buffer("code_sum", init.clone())
     self.register_buffer("code_count", torch.ones(num_code))
 
+    # Multi-GPU world size; set via ``set_distributed_world_size`` after
+    # ``torch.distributed.init_process_group`` runs. Defaults to 1 (no-op).
+    self._world_size: int = 1
+
+  def set_distributed_world_size(self, world_size: int) -> None:
+    """Wire codebook EMA to all-reduce its per-batch statistics.
+
+    When ``world_size > 1`` the per-rank ``code_sum_batch`` and
+    ``code_count_batch`` are summed across ranks before the EMA blend so
+    each rank's codebook stays bit-identical and reflects the *global*
+    batch, not its 1/world_size shard.
+    """
+    self._world_size = max(1, int(world_size))
+
   # ``register_buffer`` makes ``self.codebook`` etc. typed as
   # ``Tensor | Module`` from the static type checker's view; these
   # narrowing accessors keep the rest of the file Tensor-typed.
@@ -96,6 +110,14 @@ class EMAQuantizer(nn.Module):
 
     code_sum_batch = code_onehot @ x  # (K, D)
     code_count_batch = code_onehot.sum(dim=-1)  # (K,)
+
+    # All-reduce per-batch statistics across ranks so every rank's EMA sees
+    # the global batch, not its 1/world_size shard. Without this the
+    # codebooks would diverge and ONNX checkpoints depend on which rank
+    # saved them. Skipped when world_size == 1.
+    if self._world_size > 1:
+      torch.distributed.all_reduce(code_sum_batch, op=torch.distributed.ReduceOp.SUM)
+      torch.distributed.all_reduce(code_count_batch, op=torch.distributed.ReduceOp.SUM)
 
     # Replacement vectors for codes that didn't get used this batch.
     code_rand = self._tile(x)[: self.num_code]

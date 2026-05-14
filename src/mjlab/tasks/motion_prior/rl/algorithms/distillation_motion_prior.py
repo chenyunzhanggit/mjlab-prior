@@ -110,12 +110,20 @@ class DistillationMotionPrior:
     max_grad_norm: float | None = 1.0,
     loss_cfg: DistillationLossCfg | None = None,
     device: str | torch.device = "cpu",
+    multi_gpu_cfg: dict | None = None,
   ) -> None:
     self.policy = policy
     self.policy.to(device)
     self.device = device
     self.max_grad_norm = max_grad_norm
     self.loss_cfg = loss_cfg or DistillationLossCfg()
+
+    # Multi-GPU: when set, gradients are averaged across ranks after
+    # backward(). ``None`` means single-GPU (no-op).
+    self._multi_gpu_cfg = multi_gpu_cfg
+    self._world_size = (
+      int(multi_gpu_cfg["world_size"]) if multi_gpu_cfg is not None else 1
+    )
 
     if self.loss_cfg.loss_type == "mse":
       self._behavior_loss_fn = nn.functional.mse_loss
@@ -126,8 +134,29 @@ class DistillationMotionPrior:
 
     # Optimizer iterates only over parameters that require grad — the
     # frozen teachers contribute none.
-    trainable = [p for p in policy.parameters() if p.requires_grad]
-    self.optimizer = optim.Adam(trainable, lr=learning_rate)
+    self._trainable_params: list[torch.nn.Parameter] = [
+      p for p in policy.parameters() if p.requires_grad
+    ]
+    self.optimizer = optim.Adam(self._trainable_params, lr=learning_rate)
+
+  def _sync_gradients(self) -> None:
+    """Average ``param.grad`` across ranks via a single coalesced all-reduce.
+
+    Called after ``backward()`` and before ``clip_grad_norm_`` / ``step``
+    so clipping sees the synchronized gradient. No-op when world_size == 1.
+    """
+    if self._world_size <= 1:
+      return
+    grads = [p.grad for p in self._trainable_params if p.grad is not None]
+    if not grads:
+      return
+    flat = torch._utils._flatten_dense_tensors(grads)
+    torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.SUM)
+    flat.div_(self._world_size)
+    for buf, synced in zip(
+      grads, torch._utils._unflatten_dense_tensors(flat, grads), strict=True
+    ):
+      buf.copy_(synced)
 
   # ------------------------------------------------------------------ #
   # Submodules subject to per-module grad clipping.                    #
@@ -211,6 +240,7 @@ class DistillationMotionPrior:
 
     self.optimizer.zero_grad()
     total.backward()
+    self._sync_gradients()
     if self.max_grad_norm:
       for module in self._clipped_modules():
         nn.utils.clip_grad_norm_(module.parameters(), self.max_grad_norm)
