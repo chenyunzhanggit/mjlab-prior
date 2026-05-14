@@ -88,6 +88,16 @@ docs = [
   "sphinx-tabs",
   "sphinx_multiversion",
 ]
+# Sim2sim deploy stack — adds the few packages the ``deploy_mujoco/`` scripts
+# need on top of the core mjlab deps. Activate via:
+#   uv sync --group deploy
+deploy = [
+  "mujoco-python-viewer>=0.1.4",  # provides ``import mujoco_viewer``
+  "glfw>=2.6.0",                  # keyboard hook in deploy_mujoco_*.py
+  "pyyaml>=6.0",                  # YAML config loader
+  "joblib>=1.4.0",                # MujocoSimulator.save_log
+  "matplotlib>=3.7.0",            # MujocoSimulator.plot
+]
 
 [project.optional-dependencies]
 cu128 = ["torch>=2.7.0"]
