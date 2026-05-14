@@ -1,0 +1,47 @@
+# Real-robot deploy of mjlab G1 velocity-tracking VQ policy.
+
+# ---- mjlab two-file checkpoint ----
+# Frozen motion-prior backbone (single-VQ ckpt: motion_prior/decoder/quantizer).
+motion_prior_ckpt_path: "/home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/CHANGE_ME/model_XXXX.pt"
+# Trainable downstream actor (DownStream VQ runner ckpt: actor/critic/std).
+downstream_ckpt_path:   "/home/dx/mjlab-prior/logs/rsl_rl/g1_downstream_vq_velocity/CHANGE_ME/model_XXXX.pt"
+
+# ---- Loop timing (50 Hz control = mjlab training step_dt) ----
+control_dt: 0.02
+
+# ---- Unitree DDS ----
+msg_type:       "hg"          # G1 uses the HG (high-grade) message family
+imu_type:       "pelvis"      # G1 IMU is mounted on the pelvis
+lowcmd_topic:   "rt/lowcmd"
+lowstate_topic: "rt/lowstate"
+
+# ---- Joint ordering ----
+# Motor index in Unitree low_state.motor_state for each MJCF joint (in
+# the order printed by MJCF_JOINT_NAMES in deploy_real_velocity.py).
+# Default identity 0..28 matches the G1 firmware's standard motor map.
+# Override here if your firmware uses a custom layout.
+joint2motor_idx: [
+   0,  1,  2,  3,  4,  5,         # left  hip / knee / ankle (6)
+   6,  7,  8,  9, 10, 11,         # right hip / knee / ankle (6)
+  12, 13, 14,                     # waist yaw / roll / pitch (3)
+  15, 16, 17, 18, 19, 20, 21,     # left  shoulder×3 / elbow / wrist×3 (7)
+  22, 23, 24, 25, 26, 27, 28,     # right shoulder×3 / elbow / wrist×3 (7)
+]
+
+# ---- VQ policy hyperparams (MUST match training cfg) ----
+code_dim:    64
+num_code:    2048
+lab_lambda:  3.0
+use_lab:     true
+
+# Network widths (mjlab defaults; only override if you trained custom).
+actor_hidden_dims:        [512, 256, 128]
+motion_prior_hidden_dims: [512, 256, 128]
+decoder_hidden_dims:      [512, 256, 128]
+
+# ---- Joystick scaling ----
+# Per-axis max command magnitude reached at full stick deflection (|stick|=1).
+# Conservative values vs the mjlab training range
+# (lin_vel_x ∈ (-1, 2), lin_vel_y ∈ (-1, 1), ang_vel_z ∈ (-π, π))
+# for first-real-robot safety. Crank up once you trust the policy.
+max_cmd: [0.5, 0.3, 1.0]    # [vx_max, vy_max, wz_max]
