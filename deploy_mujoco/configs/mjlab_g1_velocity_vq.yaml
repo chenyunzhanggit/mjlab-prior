@@ -1,0 +1,40 @@
+# MuJoCo sim2sim config for mjlab G1 velocity-tracking downstream-VQ.
+#
+# Two ckpt files are required because mjlab saves the frozen
+# motion-prior backbone and the trainable downstream actor / critic
+# separately (see ``runner_single_vq.py:save`` and
+# ``downstream_runner.py:save``).
+#
+# Paths can be absolute, or relative to *this YAML file's directory*.
+
+# Frozen motion-prior backbone — must be a single-VQ ckpt
+# (top-level keys: motion_prior / decoder / quantizer / encoder / ...).
+motion_prior_ckpt_path: "/home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/CHANGE_ME/model_XXXX.pt"
+
+# Trainable downstream actor / critic / std — DownStream VQ runner ckpt.
+downstream_ckpt_path:   "/home/dx/mjlab-prior/logs/rsl_rl/g1_downstream_vq_velocity/CHANGE_ME/model_XXXX.pt"
+
+# MuJoCo MJCF (29-DOF G1, joint order = MJCF order = mjlab's training order).
+xml_path: "../xml/g1_29dof.xml"
+
+# Simulation timing.
+# step_dt = simulation_dt * control_decimation = 0.002 * 10 = 20 ms (50 Hz control)
+simulation_dt:      0.002
+control_decimation: 10
+render_decimation:  1     # render every N sim steps (>1 = faster display)
+
+# Inference device. "cpu" is fine for a single env.
+device: "cpu"
+
+# VQ hyperparams. MUST match the motion-prior training cfg.
+code_dim:   64
+num_code:   2048
+lab_lambda: 3.0
+use_lab:    true
+
+# Keyboard increment settings (mirrors the existing deploy scripts).
+# ↑ / ↓ → vx,  Z / X → wz,  L → zero,  R → reset
+step_vx: 0.1
+step_wz: 0.1
+max_vx:  2.0
+max_wz:  3.0
