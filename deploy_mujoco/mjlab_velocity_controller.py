@@ -87,7 +87,6 @@ def _build_mjlab_constants() -> dict[str, np.ndarray]:
   # Import lazily so the file can still be inspected without a full mjlab
   # install (e.g. for type-checking / docs); error message is informative.
   try:
-    from mjlab.actuator.actuator_cfg import BuiltinPositionActuatorCfg  # noqa: F401
     from mjlab.asset_zoo.robots.unitree_g1.g1_constants import (
       G1_ACTION_SCALE,
       G1_ARTICULATION,
@@ -97,7 +96,8 @@ def _build_mjlab_constants() -> dict[str, np.ndarray]:
     raise ImportError(
       "Deploy needs to import ``mjlab.asset_zoo.robots.unitree_g1`` to read "
       "the exact action_scale / kp / kd / default_pos that match training. "
-      "Make sure mjlab is installed in this env.\n  underlying error: " + str(e)
+      "Make sure mjlab is installed in this env (``uv sync --group deploy``).\n"
+      "  underlying error: " + str(e)
     ) from e
 
   num_joints = len(mujoco_joint_names)
