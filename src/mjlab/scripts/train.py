@@ -4,10 +4,11 @@ import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
@@ -63,6 +64,28 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     device = f"cuda:{local_rank}"
     # Set seed to have diversity in different processes.
     seed = cfg.agent.seed + local_rank
+
+  # Multi-GPU rendezvous BEFORE env construction. The default TCPStore
+  # rendezvous timeout is 600s; per-rank env builds (MJX JIT, asset load,
+  # secondary env construction inside MotionPriorRunner) can take several
+  # minutes and may skew across ranks, blowing past that window. We
+  # rendezvous first so the only slow path that has to share a deadline
+  # is the actual NCCL handshake, not the python-side env build.
+  world_size = int(os.environ.get("WORLD_SIZE", "1"))
+  if world_size > 1 and cuda_visible != "":
+    if not torch.distributed.is_initialized():
+      print(
+        f"[INFO] rank {rank} entering early rendezvous (world_size={world_size})",
+        flush=True,
+      )
+      torch.distributed.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(minutes=30),
+      )
+      torch.cuda.set_device(local_rank)
+      print(f"[INFO] rank {rank} rendezvous complete", flush=True)
 
   configure_torch_backends()
 

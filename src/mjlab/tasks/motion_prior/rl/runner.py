@@ -164,6 +164,9 @@ class MotionPriorOnPolicyRunner:
     method returns, ``self.is_distributed`` / ``gpu_world_size`` /
     ``gpu_global_rank`` / ``gpu_local_rank`` are set; in single-GPU mode
     all four collapse to single-process defaults.
+
+    If the process group is already initialized (e.g. ``train.py``
+    rendezvoused early to avoid env-build skew), we reuse it.
     """
     self.gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
     self.is_distributed = self.gpu_world_size > 1
@@ -188,11 +191,19 @@ class MotionPriorOnPolicyRunner:
         f"rank '{self.gpu_local_rank}'."
       )
 
-    torch.distributed.init_process_group(
-      backend="nccl",
-      rank=self.gpu_global_rank,
-      world_size=self.gpu_world_size,
-    )
+    if not torch.distributed.is_initialized():
+      # 30-minute rendezvous timeout: env_b construction (MJX JIT + asset
+      # load) can take several minutes on a cold cache. The default
+      # 10-minute timeout is too tight when rank 1 hits a cache miss and
+      # rank 0 doesn't.
+      from datetime import timedelta
+
+      torch.distributed.init_process_group(
+        backend="nccl",
+        rank=self.gpu_global_rank,
+        world_size=self.gpu_world_size,
+        timeout=timedelta(minutes=30),
+      )
     torch.cuda.set_device(self.gpu_local_rank)
 
   def _broadcast_params(self) -> None:
