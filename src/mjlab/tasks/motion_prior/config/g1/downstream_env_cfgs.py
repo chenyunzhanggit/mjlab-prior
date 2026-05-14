@@ -253,20 +253,26 @@ def unitree_g1_downstream_velocity_env_cfg(play: bool = False) -> ManagerBasedRl
   # Training: reference's training ranges (the (0, 0) ranges in
   # ``g1_downstream_vq_cfg.py:103-104`` are a debug placeholder for
   # "stand still"; the line above them is what they actually train on).
-  #
-  # Play: force all three axes to zero so the auto-sampled command is
-  # always (0, 0, 0). The robot stands still by default; the operator
-  # then drives manually via the Viser joystick (Enable checkbox →
-  # slider values). See ``--viewer viser`` on play.py.
   twist_cmd = cfg.commands["twist"]
+  twist_cmd.ranges.lin_vel_x = (-1.0, 2.0)
+  twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
+  twist_cmd.ranges.ang_vel_z = (-3.14, 3.14)
+
   if play:
-    twist_cmd.ranges.lin_vel_x = (0.0, 0.0)
-    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
-    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
-  else:
-    twist_cmd.ranges.lin_vel_x = (-1.0, 2.0)
-    twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
-    twist_cmd.ranges.ang_vel_z = (-3.14, 3.14)
+    # Play: widen the joystick range by 1.5x so the operator can probe
+    # mild out-of-distribution commands without having to first crank up
+    # the Viser ``Max <axis>`` sub-slider (which goes up to 10.0).
+    # ``rel_standing_envs=1.0`` plus zeroing heading/forward keeps the
+    # auto-sampled command at (0, 0, 0) so the robot stands still by
+    # default — the operator then ticks the joystick's "Enable"
+    # checkbox and drags sliders to drive.
+    play_scale = 1.5
+    twist_cmd.ranges.lin_vel_x = (-1.0 * play_scale, 2.0 * play_scale)
+    twist_cmd.ranges.lin_vel_y = (-1.0 * play_scale, 1.0 * play_scale)
+    twist_cmd.ranges.ang_vel_z = (-3.14 * play_scale, 3.14 * play_scale)
+    twist_cmd.rel_standing_envs = 1.0
+    twist_cmd.rel_heading_envs = 0.0
+    twist_cmd.rel_forward_envs = 0.0
 
   # -------------------- RSI noise (reference parity) -------------------- #
   # Equivalent to reference's
