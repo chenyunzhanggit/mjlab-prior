@@ -493,11 +493,15 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
     policy_cfg: dict,
     device: str | torch.device,
   ):
-    from mjlab.tasks.motion_prior.rl.policies.downstream_vq_policy import (
-      DownStreamVQPolicy,
-    )
+    # If ``image_height`` / ``image_width`` are set on the policy cfg, the
+    # actor uses a CNN branch for the flat depth-image suffix of policy_obs
+    # (see ``DownStreamVQVisionPolicy``). Otherwise fall back to the
+    # all-MLP actor.
+    img_h = policy_cfg.get("image_height")
+    img_w = policy_cfg.get("image_width")
+    use_vision = img_h is not None and img_w is not None
 
-    return DownStreamVQPolicy(
+    common_kwargs = dict(
       num_obs=num_obs,
       num_actions=num_actions,
       num_privileged_obs=num_privileged_obs,
@@ -517,3 +521,22 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
       lab_lambda=float(policy_cfg.get("lab_lambda", 3.0)),
       device=device,
     )
+
+    if use_vision:
+      from mjlab.tasks.motion_prior.rl.policies.downstream_vq_vision_policy import (
+        DownStreamVQVisionPolicy,
+      )
+
+      return DownStreamVQVisionPolicy(
+        image_height=int(img_h),
+        image_width=int(img_w),
+        depth_embedding_dim=int(policy_cfg.get("depth_embedding_dim", 64)),
+        depth_channels=tuple(policy_cfg.get("depth_channels", (16, 32, 32))),
+        **common_kwargs,
+      )
+
+    from mjlab.tasks.motion_prior.rl.policies.downstream_vq_policy import (
+      DownStreamVQPolicy,
+    )
+
+    return DownStreamVQPolicy(**common_kwargs)

@@ -4,6 +4,9 @@ from mjlab.tasks.motion_prior.rl.policies.downstream_policy import (
 from mjlab.tasks.motion_prior.rl.policies.downstream_vq_policy import (
   DownStreamVQPolicy as DownStreamVQPolicy,
 )
+from mjlab.tasks.motion_prior.rl.policies.downstream_vq_vision_policy import (
+  DownStreamVQVisionPolicy as DownStreamVQVisionPolicy,
+)
 from mjlab.tasks.motion_prior.rl.policies.motion_prior_policy import (
   MotionPriorPolicy as MotionPriorPolicy,
 )

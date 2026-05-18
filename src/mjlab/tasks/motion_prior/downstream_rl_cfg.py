@@ -25,7 +25,15 @@ class RslRlDownstreamPolicyCfg:
 @dataclass
 class RslRlDownstreamVQPolicyCfg:
   """VQ-flavor policy hyperparams. ``num_code`` / ``code_dim`` MUST match
-  whatever the motion-prior VQ training used."""
+  whatever the motion-prior VQ training used.
+
+  Setting ``image_height`` and ``image_width`` (both non-None) switches
+  the runner to the vision-aware actor (:class:`DownStreamVQVisionPolicy`):
+  the last ``image_height * image_width`` columns of ``policy_obs`` are
+  reshaped into a ``(1, H, W)`` image and routed through a small CNN
+  encoder before being concatenated with the remaining (non-vision)
+  features and fed to the actor MLP.
+  """
 
   motion_prior_hidden_dims: tuple[int, ...] = (512, 256, 128)
   decoder_hidden_dims: tuple[int, ...] = (512, 256, 128)
@@ -38,6 +46,15 @@ class RslRlDownstreamVQPolicyCfg:
   use_lab: bool = True
   lab_lambda: float = 3.0
   class_name: str = "DownStreamVQPolicy"
+
+  # ---- Vision-aware actor (optional). ----
+  # ``image_height`` and ``image_width`` both non-None enables the CNN
+  # path in ``DownStreamVQOnPolicyRunner._build_policy``. Otherwise the
+  # all-MLP ``DownStreamVQPolicy`` is used (backward-compatible default).
+  image_height: int | None = None
+  image_width: int | None = None
+  depth_embedding_dim: int = 64
+  depth_channels: tuple[int, int, int] = (16, 32, 32)
 
 
 @dataclass

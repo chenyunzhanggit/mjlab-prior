@@ -43,6 +43,7 @@ from mjlab.sensor import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.tasks.football import mdp as football_mdp
+from mjlab.tasks.football.mdp.sensors import ForwardPinholeCameraPatternCfg
 from mjlab.tasks.football.soccer_ball import (
   SOCCER_BALL_RADIUS,
   SoccerBallParams,
@@ -772,64 +773,54 @@ def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 # Passing — Perception-only variant
 # ---------------------------------------------------------------------------
 
-# Forward LiDAR sensor name. The policy reads its depth output via the
-# ``depth_image`` MDP term; the critic still gets privileged ball state.
-_PERCEPTION_SENSOR = "pelvis_forward_lidar"
-
-# Geometry: 16 × 11 grid of parallel rays sweeping a 1.5 m × 1.0 m virtual
-# scan plane in front of pelvis. resolution=0.1 → 176 rays (small enough
-# to keep the policy input tractable, dense enough to detect the 22 cm
-# soccer ball at 3–6 m).
-_PERCEPTION_GRID_SIZE = (1.5, 1.0)
-_PERCEPTION_GRID_RES = 0.1
+# Forward depth camera (RealSense-style) on the G1 pelvis. VisualMimic
+# (Yin & Ze, 2025) recipe — pinhole 80×45 depth → CNN encoder → concat
+# proprio → MLP, with random rectangular masking for sim2real robustness.
+_PERCEPTION_SENSOR = "pelvis_forward_camera"
+_PERCEPTION_CAMERA_WIDTH = 80
+_PERCEPTION_CAMERA_HEIGHT = 45
+_PERCEPTION_CAMERA_FOVY = 58.0  # vertical FoV; matches D435i default
 _PERCEPTION_MAX_DISTANCE = 5.0
-_PERCEPTION_NUM_RAYS = 176  # 16 × 11; sanity-checked in tests
+_PERCEPTION_NUM_RAYS = _PERCEPTION_CAMERA_WIDTH * _PERCEPTION_CAMERA_HEIGHT
 
 
 def _make_g1_forward_lidar_sensor() -> RayCastSensorCfg:
-  """Forward-facing LiDAR-style raycast on the G1 pelvis.
+  """Forward-facing pinhole depth camera on the G1 pelvis (VisualMimic-style).
 
-  Rays are parallel along pelvis local +X (forward), arranged on a 1.5 m ×
-  1.0 m grid in the pelvis local YZ plane. With ``ray_alignment="base"``
-  the whole array rotates with the pelvis, so as the robot turns the
-  policy's depth image rotates with it — same semantics as a chest-mounted
-  multi-line LiDAR or stereo depth camera.
+  Pinhole rays diverge from one optical centre at the pelvis, fovy=58°,
+  aspect 16:9 → hfov ≈ 89°. 80 × 45 = 3600 rays. ``ray_alignment="base"``
+  ties the camera to the pelvis quaternion, so as the robot turns the
+  depth image rotates with it — same semantics as a chest-mounted RealSense.
 
-  Why GridPattern instead of PinholeCamera: PinholeCameraPatternCfg
-  generates rays along the MuJoCo camera convention (-Z forward), which
-  would require adding a forward-rotated site to the G1 MJCF. GridPattern
-  + ``direction=(1, 0, 0)`` avoids touching the robot spec and gives the
-  same downstream-task signal (a "what's in front of me?" depth map).
+  The pattern is :class:`ForwardPinholeCameraPatternCfg` (a duck-typed
+  drop-in for mjlab's built-in ``PinholeCameraPatternCfg``) — needed
+  because the built-in one fires rays along -Z (MuJoCo camera convention)
+  and would point at the floor when attached to pelvis. The custom
+  variant fires along +X (forward) instead, with no robot-spec changes.
   """
   return RayCastSensorCfg(
     name=_PERCEPTION_SENSOR,
     frame=ObjRef(type="body", name="pelvis", entity="robot"),
-    pattern=GridPatternCfg(
-      size=_PERCEPTION_GRID_SIZE,
-      resolution=_PERCEPTION_GRID_RES,
-      direction=(1.0, 0.0, 0.0),
+    pattern=ForwardPinholeCameraPatternCfg(  # type: ignore[arg-type]
+      width=_PERCEPTION_CAMERA_WIDTH,
+      height=_PERCEPTION_CAMERA_HEIGHT,
+      fovy=_PERCEPTION_CAMERA_FOVY,
     ),
     ray_alignment="base",
     max_distance=_PERCEPTION_MAX_DISTANCE,
     exclude_parent_body=True,
-    # Include all geom groups (0=terrain, 1=collision, 2=ball etc.). The
-    # ball geom is in the default group 0 of the soccer-ball spec, so it
-    # registers as a hit.
+    # Include all geom groups so the soccer ball geom registers as a hit.
     include_geom_groups=None,
     # ``debug_vis=True`` makes viser auto-create a toggle GUI for this
-    # sensor (sidebar → Sensor debug viz → pelvis_forward_lidar).
-    # When enabled at play time the viewer renders one small cyan
-    # sphere per ray hit (176 max), so you can literally watch the
-    # ball/ground show up in the policy's depth signal. ``show_rays=True``
-    # additionally draws all 176 arrows — useful for confirming sensor
-    # orientation but very cluttered for 176-ray inference.
+    # sensor; default visualisation is the per-hit cyan spheres (no ray
+    # arrows — 3600 arrows is unusable).
     debug_vis=True,
     viz=RayCastSensorCfg.VizCfg(
       hit_color=(0.0, 1.0, 0.0, 0.8),
       miss_color=(1.0, 0.0, 0.0, 0.2),
       hit_sphere_color=(0.0, 1.0, 1.0, 0.9),
-      hit_sphere_radius=0.3,
-      show_rays=False,  # Flip to True if you want to see ray arrows.
+      hit_sphere_radius=0.15,
+      show_rays=False,
     ),
   )
 
@@ -837,72 +828,123 @@ def _make_g1_forward_lidar_sensor() -> RayCastSensorCfg:
 def unitree_g1_passing_perception_env_cfg(
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-  """Perception-only passing task.
+  """Perception-only passing task (VisualMimic-style depth-CNN pipeline).
 
   Same physics / rewards / terminations / reset events as
   :func:`unitree_g1_passing_env_cfg`, but the policy can no longer read
   ball state directly. Instead it sees:
 
-  * ``passing_source_position`` — the task command ("kick the incoming ball
-    back to *this* location"), still in body frame. Necessary because the
-    target zone is part of the goal, not something the robot has to find.
-  * ``ball_depth_image`` — a flat 176-dim depth scan from a forward LiDAR
-    on the pelvis. The policy has to *infer* where the ball is from the
-    depth pattern, the same as a real robot would.
+  * ``passing_source_position`` — the task command ("kick the incoming
+    ball back to *this* location"), in body frame.
+  * ``ball_depth_image`` — a flat ``H*W = 45 * 80 = 3600`` depth image
+    from a forward pinhole camera on the pelvis. The flat layout is
+    row-major (``meshgrid(u, v, indexing="xy").flatten()``), so the
+    policy's CNN can ``view(-1, 1, 45, 80)`` to recover the 2D image.
 
   Critic obs are unchanged: ``ball_relative_position`` / ``ball_velocity``
-  / ``passing_source_position`` / ``ball_absolute_position`` (privileged).
-  This is the standard PPO asymmetric-actor-critic trick: the value
-  function gets oracle ball state for stable training, the policy
-  doesn't, so deployment behavior matches what the policy learnt.
+  / ``passing_source_position`` / ``ball_absolute_position`` (privileged)
+  — the standard PPO asymmetric actor-critic trick: the value function
+  gets oracle ball state for stable training, the policy doesn't.
+
+  Obs layout chosen so that ``ball_depth_image`` is the **last** entry
+  of the policy obs vector. This lets the vision-aware policy
+  (:class:`DownStreamVQVisionPolicy`) split ``obs[:, :-H*W]`` (proprio +
+  task cmd) from ``obs[:, -H*W:]`` (depth pixels) with a single slice.
+  Don't reorder the dict below without updating the policy accordingly.
   """
   cfg = unitree_g1_passing_env_cfg(play=play)
 
-  # Attach the forward LiDAR to the existing sensor tuple.
+  # Attach the forward depth camera to the existing sensor tuple.
   cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_forward_lidar_sensor())
 
   enable_corruption = not play
 
-  # Rebuild observations: policy drops direct ball state, gains depth_image.
-  # Critic keeps privileged ball state for value-function learning.
-  cfg.observations = _make_football_obs_groups(
-    policy_extra_terms={
-      "passing_source_position": ObservationTermCfg(
-        func=football_mdp.passing_source_position,
-        params={"command_name": "passing_commands"},
-      ),
-      # 176-dim flat depth scan. ``scale=1/max_distance`` normalises into
-      # roughly [0, 1] so it plays nicely with the actor MLP (the
-      # downstream-VQ runner doesn't apply empirical normalisation).
-      # ``noise`` mimics depth-sensor jitter for sim2real robustness.
-      "ball_depth_image": ObservationTermCfg(
-        func=football_mdp.depth_image,
-        params={
-          "sensor_name": _PERCEPTION_SENSOR,
-          "scale": 1.0 / _PERCEPTION_MAX_DISTANCE,
-        },
-        noise=Unoise(n_min=-0.02, n_max=0.02),
-      ),
-    },
-    critic_extra_terms={
-      "ball_relative_position": ObservationTermCfg(
-        func=football_mdp.ball_relative_position,
-        params={"ball_name": _BALL_ENTITY, "asset_name": "robot"},
-      ),
-      "ball_velocity": ObservationTermCfg(
-        func=football_mdp.ball_velocity,
-        params={"ball_name": _BALL_ENTITY},
-      ),
-      "passing_source_position": ObservationTermCfg(
-        func=football_mdp.passing_source_position,
-        params={"command_name": "passing_commands"},
-      ),
-      "ball_absolute_position": ObservationTermCfg(
-        func=football_mdp.ball_absolute_position,
-        params={"ball_name": _BALL_ENTITY},
-      ),
-    },
-    enable_corruption=enable_corruption,
+  # Build observations manually (NOT via ``_make_football_obs_groups``)
+  # because we need full control over the term insertion order. mjlab's
+  # ObservationGroupCfg concats terms in dict-insertion order.
+  motion_prior_obs = _make_motion_prior_obs_group(
+    enable_corruption=enable_corruption, with_height_scan=False
   )
 
+  # Policy obs (in concat order):
+  #   passing_source_position (3) → proprio (372) → ball_depth_image (H*W)
+  policy_terms: dict[str, ObservationTermCfg] = {
+    "passing_source_position": ObservationTermCfg(
+      func=football_mdp.passing_source_position,
+      params={"command_name": "passing_commands"},
+    ),
+    **_make_proprio_terms(),
+    "ball_depth_image": ObservationTermCfg(
+      func=football_mdp.depth_image,
+      params={
+        "sensor_name": _PERCEPTION_SENSOR,
+        "scale": 1.0 / _PERCEPTION_MAX_DISTANCE,
+        "image_height": _PERCEPTION_CAMERA_HEIGHT,
+        "image_width": _PERCEPTION_CAMERA_WIDTH,
+        # Random rectangular masks during training only; disabled at play
+        # so the visualised depth image cleanly shows what the camera
+        # actually sees. The default knobs match VisualMimic §III-D-a.
+        "apply_mask": enable_corruption,
+      },
+      # Multiplicative Gaussian-like additive jitter on the scaled
+      # (normalised) depth; matches the magnitude VisualMimic uses
+      # implicitly via spatial filter residuals. 0.02 in [0,1] space ≈
+      # 10 cm at 5 m max range.
+      noise=Unoise(n_min=-0.02, n_max=0.02),
+    ),
+  }
+  policy = ObservationGroupCfg(
+    terms=policy_terms,
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  # Critic gets privileged ball state, NO depth — value function uses
+  # oracle info. Adds base_lin_vel for parity with other downstream tasks.
+  critic_terms: dict[str, ObservationTermCfg] = {
+    "ball_relative_position": ObservationTermCfg(
+      func=football_mdp.ball_relative_position,
+      params={"ball_name": _BALL_ENTITY, "asset_name": "robot"},
+    ),
+    "ball_velocity": ObservationTermCfg(
+      func=football_mdp.ball_velocity,
+      params={"ball_name": _BALL_ENTITY},
+    ),
+    "passing_source_position": ObservationTermCfg(
+      func=football_mdp.passing_source_position,
+      params={"command_name": "passing_commands"},
+    ),
+    **_make_proprio_terms(),
+    "base_lin_vel": ObservationTermCfg(
+      func=envs_mdp.builtin_sensor,
+      params={"sensor_name": "robot/imu_lin_vel"},
+    ),
+    "ball_absolute_position": ObservationTermCfg(
+      func=football_mdp.ball_absolute_position,
+      params={"ball_name": _BALL_ENTITY},
+    ),
+  }
+  critic = ObservationGroupCfg(
+    terms=critic_terms,
+    concatenate_terms=True,
+    enable_corruption=False,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  cfg.observations = {
+    "motion_prior_obs": motion_prior_obs,
+    "policy": policy,
+    "critic": critic,
+  }
+
   return cfg
+
+
+# Image shape exposed for the runner cfg / depth-viz script so they don't
+# duplicate the numbers.
+PERCEPTION_IMAGE_HEIGHT = _PERCEPTION_CAMERA_HEIGHT
+PERCEPTION_IMAGE_WIDTH = _PERCEPTION_CAMERA_WIDTH
+PERCEPTION_SENSOR_NAME = _PERCEPTION_SENSOR
