@@ -719,3 +719,81 @@ def foothold_penalty(
       gate = (terrain.terrain_levels > level_threshold).float()
       reward = reward * gate
   return reward
+
+
+class feet_contact_singlefoot:
+  """CReF Table I "Feet contact" reward.
+
+  Expression (paper):
+      r_feet_contact = I_stand + (1 - I_stand) * I_single^{0, 0.2s}
+
+  Where:
+    I_stand           = 1{ |u_xy_cmd|_2 + |w_yaw_cmd| < u_s }
+    I_single^{0,0.2s} = 1 if a single-foot contact has occurred within the
+                        last ``history_seconds``, else 0.
+
+  Intuition: when commanded to stand, give a constant +1 baseline so the
+  policy can collect non-zero return without locomoting. When commanded to
+  move, only reward time intervals where the gait actually transitions
+  through a single-support phase. This directly suppresses the
+  shuffle / double-support attractor on stairs (both feet always on the same
+  step => I_single never fires).
+
+  Args:
+    sensor_name: Contact sensor whose ``found`` per-foot tells us how many
+      feet touch the ground each step. Must contain both feet as primaries.
+    command_name: Velocity command term name (default ``"twist"``).
+    stand_speed_thresh: ``u_s`` — total commanded speed below this counts
+      as standing.
+    history_seconds: ``0.2 s`` window length for ``I_single``.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self._env = env
+    self._sensor_name: str = cfg.params["sensor_name"]
+    self._command_name: str = cfg.params.get("command_name", "twist")
+    self._stand_speed_thresh: float = cfg.params.get("stand_speed_thresh", 0.1)
+    self._history_seconds: float = cfg.params.get("history_seconds", 0.2)
+
+    self._history_steps: int = max(1, int(round(self._history_seconds / env.step_dt)))
+    self._single_history = torch.zeros(
+      env.num_envs, self._history_steps, device=env.device, dtype=torch.bool
+    )
+    self._head: int = 0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    stand_speed_thresh: float = 0.1,
+    history_seconds: float = 0.2,
+  ) -> torch.Tensor:
+    del sensor_name, command_name, stand_speed_thresh, history_seconds  # use self.*
+
+    contact_sensor: ContactSensor = env.scene[self._sensor_name]
+    found = contact_sensor.data.found
+    assert found is not None, (
+      "feet_contact_singlefoot needs the contact sensor's 'found' field."
+    )
+    in_contact = found > 0  # [B, F_feet]
+    n_in_contact = in_contact.sum(dim=1)  # [B]
+    is_single = n_in_contact == 1  # [B]
+
+    self._single_history[:, self._head] = is_single
+    self._head = (self._head + 1) % self._history_steps
+
+    single_in_window = self._single_history.any(dim=1)  # [B]
+
+    command = env.command_manager.get_command(self._command_name)
+    assert command is not None
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    total_command = linear_norm + angular_norm
+    is_stand = total_command < self._stand_speed_thresh  # [B]
+
+    reward = is_stand.float() + (~is_stand).float() * single_in_window.float()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self._single_history[env_ids] = False

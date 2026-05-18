@@ -286,12 +286,12 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
   num_cols=20,
   # terrain_class follows MoRE convention: 0=easy/flat, 1=medium/slope, 2=hard/stairs.
   sub_terrains={
-    "flat": flat(proportion=0.3, terrain_class=0),
+    "flat": flat(proportion=1.0, terrain_class=0),
     "pyramid_stairs": pyramid_stairs(
-      proportion=0.35, step_height_range=(0.06, 0.15), terrain_class=2
+      proportion=0.0, step_height_range=(0.06, 0.15), terrain_class=2
     ),
     "pyramid_stairs_inv": pyramid_stairs_inv(
-      proportion=0.35, step_height_range=(0.06, 0.15), terrain_class=2
+      proportion=0.0, step_height_range=(0.06, 0.15), terrain_class=2
     ),
     "hf_pyramid_slope": hf_pyramid_slope(
       proportion=0.0, slope_range=(0.0, 0.3), terrain_class=1

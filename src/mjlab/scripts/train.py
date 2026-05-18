@@ -50,6 +50,13 @@ class TrainConfig:
     return TrainConfig(env=env_cfg, agent=agent_cfg)
 
 
+def _sync_amp_variant(cfg: "TrainConfig") -> None:
+  """Thin wrapper: forward to the shared sync helper in the amp_velocity pkg."""
+  from mjlab.tasks.amp_velocity.variant import sync_amp_variant
+
+  sync_amp_variant(cfg.env, cfg.agent)
+
+
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
   if cuda_visible == "":
@@ -91,6 +98,11 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   cfg.agent.seed = seed
   cfg.env.seed = seed
+
+  # AMP variant sync: when training the AMP-velocity task, --agent.amp.variant
+  # may have flipped the rl-side cfg via CLI. The env's "amp" obs group must
+  # be rebuilt to match (the registry only knows the default variant).
+  _sync_amp_variant(cfg)
 
   print(f"[INFO] Training with: device={device}, seed={seed}, rank={rank}")
 
@@ -215,6 +227,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
 
+  import ipdb
+
+  ipdb.set_trace()
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
   )

@@ -211,6 +211,14 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         "velocity_range": {},
       },
     ),
+    "reset_yaw_on_stairs": EventTermCfg(
+      func=mdp.reset_yaw_for_terrain_class,
+      mode="reset",
+      params={
+        "terrain_classes": (2,),
+        "yaw_range": (-0.2, 0.2),
+      },
+    ),
     "reset_robot_joints": EventTermCfg(
       func=mdp.reset_joints_by_offset,
       mode="reset",
@@ -325,9 +333,10 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
-    # "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-1e-3),
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+    "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-2e-4),
+    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.01),
     # "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.05),
+    "joint_torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-1e-5),
     "air_time": RewardTermCfg(
       func=mdp.feet_air_time,
       weight=0.0,  # Override per-robot.

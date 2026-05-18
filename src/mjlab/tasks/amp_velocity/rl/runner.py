@@ -33,9 +33,12 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.tasks.amp_velocity.rl.amp_ppo import AMPPPO
 from mjlab.tasks.amp_velocity.rl.discriminator import Discriminator
+from mjlab.tasks.amp_velocity.rl.discriminator_multi import DiscriminatorMulti
 from mjlab.tasks.amp_velocity.rl.motion_loader import AMPLoader
+from mjlab.tasks.amp_velocity.rl.motion_loader_joint import AMPJointLoader
 from mjlab.tasks.amp_velocity.rl.normalizer import Normalizer
 from mjlab.tasks.amp_velocity.rl.replay_buffer import ReplayBuffer
+from mjlab.tasks.amp_velocity.rl.replay_buffer_multi import ReplayBufferMulti
 
 
 def _resolve_body_names_for_amp_loader(env: VecEnv) -> list[str]:
@@ -48,6 +51,12 @@ def _resolve_body_names_for_amp_loader(env: VecEnv) -> list[str]:
   """
   robot = env.unwrapped.scene["robot"]  # type: ignore[attr-defined]
   return list(robot.body_names)
+
+
+def _resolve_joint_names_for_amp_loader(env: VecEnv) -> list[str]:
+  """Same as :func:`_resolve_body_names_for_amp_loader`, but for joints."""
+  robot = env.unwrapped.scene["robot"]  # type: ignore[attr-defined]
+  return list(robot.joint_names)
 
 
 class AmpVelocityOnPolicyRunner(MjlabOnPolicyRunner):
@@ -177,36 +186,78 @@ class AmpVelocityOnPolicyRunner(MjlabOnPolicyRunner):
 
     # --- AMP-side construction -------------------------------------------
     amp_cfg = cfg["amp"]
+    variant = amp_cfg.get("variant", "body")
+    self._amp_variant = variant
     body_names_in_order = _resolve_body_names_for_amp_loader(env)
-    amp_data = AMPLoader(
-      motion_file=amp_cfg["motion_dir"],
-      body_names=amp_cfg["tracked_bodies"],
-      anchor_name=amp_cfg["anchor_body"],
-      all_body_names=body_names_in_order,
-      device=device,
-    )
-    amp_obs_dim = amp_data.observation_dim
-    # Sanity: the env's amp obs group must produce the same dim.
-    env_amp_dim = int(obs["amp"].shape[-1])
-    assert env_amp_dim == amp_obs_dim, (
-      f"AMP obs dim mismatch: env produces {env_amp_dim}, loader expects "
-      f"{amp_obs_dim}. Check tracked_bodies / anchor_body match between "
-      f"env_cfgs and rl_cfg."
-    )
 
-    discriminator = Discriminator(
-      input_dim=2 * amp_obs_dim,
-      amp_reward_coef=amp_cfg["reward_coef"],
-      hidden_layer_sizes=list(amp_cfg["discriminator_hidden"]),
-      device=device,
-      task_reward_lerp=amp_cfg["task_reward_lerp"],
-    )
-    amp_normalizer = Normalizer(input_dim=amp_obs_dim)
-    amp_storage = ReplayBuffer(
-      obs_dim=amp_obs_dim,
-      buffer_size=int(amp_cfg["replay_buffer_size"]),
-      device=device,
-    )
+    if variant == "body":
+      amp_data: AMPLoader | AMPJointLoader = AMPLoader(
+        motion_file=amp_cfg["motion_dir"],
+        body_names=amp_cfg["tracked_bodies"],
+        anchor_name=amp_cfg["anchor_body"],
+        all_body_names=body_names_in_order,
+        device=device,
+      )
+      amp_obs_dim = amp_data.observation_dim
+      env_amp_dim = int(obs["amp"].shape[-1])
+      assert env_amp_dim == amp_obs_dim, (
+        f"AMP obs dim mismatch (body variant): env produces {env_amp_dim}, "
+        f"loader expects {amp_obs_dim}. Check tracked_bodies / anchor_body "
+        f"match between env_cfgs and rl_cfg."
+      )
+
+      discriminator: Discriminator | DiscriminatorMulti = Discriminator(
+        input_dim=2 * amp_obs_dim,
+        amp_reward_coef=amp_cfg["reward_coef"],
+        hidden_layer_sizes=list(amp_cfg["discriminator_hidden"]),
+        device=device,
+        task_reward_lerp=amp_cfg["task_reward_lerp"],
+      )
+      amp_normalizer = Normalizer(input_dim=amp_obs_dim)
+      amp_storage: ReplayBuffer | ReplayBufferMulti = ReplayBuffer(
+        obs_dim=amp_obs_dim,
+        buffer_size=int(amp_cfg["replay_buffer_size"]),
+        device=device,
+      )
+      self._amp_num_frames = 1
+    elif variant == "joint":
+      joint_names_in_order = _resolve_joint_names_for_amp_loader(env)
+      num_frames = int(amp_cfg["num_frames"])
+      amp_data = AMPJointLoader(
+        motion_file=amp_cfg["motion_dir"],
+        joint_names=amp_cfg["amp_joints"],
+        all_joint_names=joint_names_in_order,
+        pelvis_body_name=amp_cfg["pelvis_body"],
+        all_body_names=body_names_in_order,
+        num_frames=num_frames,
+        device=device,
+      )
+      amp_obs_dim = amp_data.observation_dim
+      env_amp_dim = int(obs["amp"].shape[-1])
+      assert env_amp_dim == amp_obs_dim, (
+        f"AMP obs dim mismatch (joint variant): env produces {env_amp_dim}, "
+        f"loader expects {amp_obs_dim} = 6 + 2*J. Check amp_joints / "
+        f"pelvis_body match between env_cfgs and rl_cfg."
+      )
+
+      discriminator = DiscriminatorMulti(
+        state_dim=amp_obs_dim,
+        num_frames=num_frames,
+        amp_reward_coef=amp_cfg["reward_coef"],
+        hidden_layer_sizes=list(amp_cfg["discriminator_hidden"]),
+        device=device,
+        task_reward_lerp=amp_cfg["task_reward_lerp"],
+      )
+      amp_normalizer = Normalizer(input_dim=amp_obs_dim)
+      amp_storage = ReplayBufferMulti(
+        state_dim=amp_obs_dim,
+        num_frames=num_frames,
+        buffer_size=int(amp_cfg["replay_buffer_size"]),
+        device=device,
+      )
+      self._amp_num_frames = num_frames
+    else:
+      raise ValueError(f"Unknown amp variant {variant!r}; expected 'body' or 'joint'.")
 
     alg = AMPPPO(
       actor,
@@ -221,6 +272,7 @@ class AmpVelocityOnPolicyRunner(MjlabOnPolicyRunner):
       amp_storage=amp_storage,
       discriminator_lr=amp_cfg["discriminator_lr"],
       discriminator_weight_decay=amp_cfg["discriminator_weight_decay"],
+      discriminator_head_weight_decay=amp_cfg.get("discriminator_head_weight_decay"),
       grad_pen_lambda=amp_cfg["grad_pen_lambda"],
     )
 
@@ -253,6 +305,17 @@ class AmpVelocityOnPolicyRunner(MjlabOnPolicyRunner):
 
     obs = self.env.get_observations().to(self.device)
     amp_obs = obs["amp"].to(self.device)
+
+    # K-frame sliding window for the joint variant. Shape (B, K, d). The
+    # last slot always holds the most recent amp_obs.
+    amp_obs_frames: torch.Tensor | None = None
+    if self._amp_variant == "joint":
+      amp_obs_frames = torch.zeros(
+        (self.env.num_envs, self._amp_num_frames, amp_obs.shape[-1]),
+        device=self.device,
+      )
+      amp_obs_frames[:, -1] = amp_obs
+
     self.alg.train_mode()
 
     if self.is_distributed:
@@ -279,28 +342,63 @@ class AmpVelocityOnPolicyRunner(MjlabOnPolicyRunner):
           dones = dones.to(self.device)
           next_amp_obs = obs["amp"].to(self.device)
 
-          # Per AMP_mjlab: at reset boundaries, the post-reset amp obs does
-          # NOT belong to the same episode as the pre-step amp obs, so the
-          # transition is meaningless to the discriminator. Replace those
-          # rows with the pre-step value so (s, s') stays self-consistent.
           reset_env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
-          next_amp_obs_with_term = next_amp_obs.clone()
-          if reset_env_ids.numel() > 0:
-            next_amp_obs_with_term[reset_env_ids] = amp_obs[reset_env_ids]
 
-          # AMP reward (optionally lerp'd with env reward); shape (num_envs,).
-          amp_reward, _ = self.alg.discriminator.predict_amp_reward(
-            amp_obs,
-            next_amp_obs_with_term,
-            env_rewards,
-            normalizer=self.alg.amp_normalizer,
-          )
+          if self._amp_variant == "body":
+            # Per AMP_mjlab: at reset boundaries, the post-reset amp obs does
+            # NOT belong to the same episode as the pre-step amp obs, so the
+            # transition is meaningless to the discriminator. Replace those
+            # rows with the pre-step value so (s, s') stays self-consistent.
+            next_amp_obs_with_term = next_amp_obs.clone()
+            if reset_env_ids.numel() > 0:
+              next_amp_obs_with_term[reset_env_ids] = amp_obs[reset_env_ids]
+
+            discriminator_body = self.alg.discriminator
+            storage_body = self.alg.amp_storage
+            assert isinstance(discriminator_body, Discriminator)
+            assert isinstance(storage_body, ReplayBuffer)
+            amp_reward, _ = discriminator_body.predict_amp_reward(
+              amp_obs,
+              next_amp_obs_with_term,
+              env_rewards,
+              normalizer=self.alg.amp_normalizer,
+            )
+            storage_body.insert(amp_obs, next_amp_obs_with_term)
+          else:
+            # Joint variant: maintain a (B, K, d) sliding window.
+            assert amp_obs_frames is not None  # for type checker
+            # First account for termination: replace next_amp_obs of just-reset
+            # envs with the pre-reset amp_obs so the window's last frame stays
+            # self-consistent for this step's disc reward.
+            next_amp_obs_with_term = next_amp_obs.clone()
+            if reset_env_ids.numel() > 0:
+              next_amp_obs_with_term[reset_env_ids] = amp_obs[reset_env_ids]
+
+            # Push next frame: shift left, append on the right.
+            amp_obs_frames = torch.cat(
+              [amp_obs_frames[:, 1:], next_amp_obs_with_term.unsqueeze(1)], dim=1
+            )
+
+            discriminator_multi = self.alg.discriminator
+            storage_multi = self.alg.amp_storage
+            assert isinstance(discriminator_multi, DiscriminatorMulti)
+            assert isinstance(storage_multi, ReplayBufferMulti)
+            amp_reward, _ = discriminator_multi.predict_amp_reward(
+              amp_obs_frames,
+              env_rewards,
+              normalizer=self.alg.amp_normalizer,
+            )
+            storage_multi.insert(amp_obs_frames)
+
+            # Reset the window for envs that just terminated so the next
+            # episode's discriminator input doesn't carry stale frames.
+            if reset_env_ids.numel() > 0:
+              amp_obs_frames[reset_env_ids] = 0
+
           mean_amp_reward_buf.append(amp_reward.mean().item())
 
-          # Feed the discriminator-blended reward through PPO; insert policy
-          # AMP sample for the next disc update.
+          # Feed the discriminator-blended reward through PPO.
           self.alg.process_env_step(obs, amp_reward, dones, extras)
-          self.alg.amp_storage.insert(amp_obs, next_amp_obs_with_term)
 
           intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
           # Log raw env reward; AMP reward is logged separately.

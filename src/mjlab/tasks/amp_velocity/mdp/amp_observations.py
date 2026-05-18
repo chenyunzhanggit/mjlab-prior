@@ -137,3 +137,51 @@ def robot_body_ang_vel_b(
     body_ang_vel_w.reshape(-1, 3),
   ).reshape(env.num_envs, num_bodies, 3)
   return body_ang_vel_b.reshape(env.num_envs, -1)
+
+
+# --------------------------------------------------------------------------- #
+# Joint-space variant (telebotM2-style AMP features).                         #
+#                                                                             #
+# These functions back the ``amp_variant="joint"`` mode. The per-step AMP     #
+# feature is (base_lin_vel_b, base_ang_vel_b, joint_pos, joint_vel), all      #
+# absolute values (no default subtraction). Pair with a SceneEntityCfg that   #
+# carries the desired joint subset via ``joint_names`` + ``preserve_order``.  #
+# --------------------------------------------------------------------------- #
+
+_DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
+
+
+def robot_base_lin_vel_b(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+  """Root link linear velocity expressed in the root's own body frame. (B, 3)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return asset.data.root_link_lin_vel_b
+
+
+def robot_base_ang_vel_b(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+  """Root link angular velocity expressed in the root's own body frame. (B, 3)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return asset.data.root_link_ang_vel_b
+
+
+def robot_joint_pos(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+  """Absolute joint positions (no default subtraction). (B, J)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return asset.data.joint_pos[:, asset_cfg.joint_ids]
+
+
+def robot_joint_vel(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+  """Joint velocities. (B, J)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return asset.data.joint_vel[:, asset_cfg.joint_ids]

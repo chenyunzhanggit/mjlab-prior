@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from mjlab.rl.config import RslRlOnPolicyRunnerCfg
 from mjlab.tasks.amp_velocity.config.g1.env_cfgs import (
   AMP_ANCHOR_BODY,
+  AMP_G1_ALL_JOINTS,
+  AMP_PELVIS_BODY,
   AMP_TRACKED_BODIES,
 )
 from mjlab.tasks.velocity.config.g1.rl_cfg import unitree_g1_ppo_runner_cfg
@@ -46,25 +48,55 @@ def _default_motion_dir() -> str:
 
 @dataclass
 class RslRlAmpCfg:
-  """AMP discriminator / reward / replay knobs."""
+  """AMP discriminator / reward / replay knobs.
+
+  Two variants are supported, selected by ``variant``:
+
+  - ``"body"`` (default): AMP_mjlab-style (s, s') discriminator over body-space
+    features. ``tracked_bodies`` / ``anchor_body`` apply.
+  - ``"joint"``: telebotM2-style K-frame stack discriminator over joint-space
+    features. ``amp_joints`` / ``pelvis_body`` / ``num_frames`` apply.
+
+  When changing ``variant`` here, also pass the same value to
+  ``g1_amp_velocity_rough_env_cfg(amp_variant=...)``; otherwise the env's
+  ``amp`` obs group will disagree with the loader / discriminator built in the
+  runner and the dim assert will fire.
+  """
+
+  variant: str = "body"
+  """Selects which AMP feature / discriminator variant to use ('body' or 'joint')."""
 
   motion_dir: str = field(default_factory=_default_motion_dir)
   """Path to a directory of expert motion ``.npz`` files (or a single file)."""
 
+  # ---- body variant ---------------------------------------------------- #
   tracked_bodies: tuple[str, ...] = AMP_TRACKED_BODIES
-  """Bodies included in the AMP feature vector. Must match the env's
-  ``amp`` obs group exactly — order is part of the feature definition."""
+  """Bodies included in the AMP feature vector (body variant only). Must match
+  the env's ``amp`` obs group exactly — order is part of the feature definition."""
 
   anchor_body: str = AMP_ANCHOR_BODY
-  """Body whose frame the AMP features are expressed in."""
+  """Body whose frame the AMP features are expressed in (body variant only)."""
 
+  # ---- joint variant --------------------------------------------------- #
+  amp_joints: tuple[str, ...] = AMP_G1_ALL_JOINTS
+  """Joints included in the AMP feature vector (joint variant only). Order
+  must match the env's ``amp`` obs group exactly."""
+
+  pelvis_body: str = AMP_PELVIS_BODY
+  """Body whose world-frame velocity gives base lin/ang vel (joint variant only)."""
+
+  num_frames: int = 5
+  """K — number of consecutive frames stacked per discriminator sample (joint
+  variant only). Matches telebotM2's ``amp_num_frames=5``."""
+
+  # ---- shared ---------------------------------------------------------- #
   discriminator_hidden: tuple[int, ...] = (1024, 512, 256)
   """Hidden layer sizes of the discriminator trunk."""
 
-  reward_coef: float = 0.4
+  reward_coef: float = 0.5
   """Scalar multiplier on the AMP-derived reward before lerp."""
 
-  task_reward_lerp: float = 0.7
+  task_reward_lerp: float = 0.6
   """Blend factor between AMP reward (0.0) and env task reward (1.0).
 
   0.0 → reward = amp_reward (pure style imitation).
@@ -84,8 +116,22 @@ class RslRlAmpCfg:
   this lets us tune them independently and avoids weight-decay leakage.
   """
 
-  discriminator_weight_decay: float = 1.0e-2
-  """Weight decay on the discriminator parameters."""
+  discriminator_weight_decay: float = 1.0e-3
+  """Weight decay on the discriminator *trunk* parameters.
+
+  Matches AMP_mjlab's ``amp_trunk`` group (1e-3). The previous unified value
+  (1e-2) was 10× too large for the trunk and 10× too small for the head; the
+  resulting disc saturated within tens of iterations (logits pinned at ±1).
+  """
+
+  discriminator_head_weight_decay: float = 1.0e-1
+  """Weight decay on the discriminator *output head* (``amp_linear``).
+
+  AMP_mjlab uses 1e-1 here — 100× larger than the trunk. This is the key
+  trick that keeps the LSGAN logits from running away to ±∞: it bounds the
+  norm of the final linear layer so ``d_expert`` / ``d_policy`` stay near
+  ±0.3-0.5 rather than collapsing to ±1 (which kills the AMP reward).
+  """
 
 
 @dataclass

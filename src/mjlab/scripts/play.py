@@ -41,6 +41,10 @@ class PlayConfig:
   wandb_checkpoint_name: str | None = None
   """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
   checkpoint_file: str | None = None
+  amp_variant: Literal["auto", "body", "joint"] = "auto"
+  """AMP feature/discriminator variant. ``auto`` (default) infers from the
+  checkpoint's discriminator weights — pass ``body`` / ``joint`` to override
+  (or when running the env without a trained checkpoint)."""
   motion_file: str | None = None
   motion_path: str | None = None
   """Directory of .npz motions for multi-motion tasks (recursive glob)."""
@@ -237,6 +241,29 @@ def run_play(task_id: str, cfg: PlayConfig):
         f"[INFO]: Loading checkpoint: {checkpoint_name} (run: {run_id}, {cached_str})"
       )
     log_dir = resume_path.parent
+
+  # AMP variant resolution: rebuild env's "amp" obs group + agent_cfg.amp.variant
+  # so the runner builds the matching discriminator / loader. Auto-detection
+  # peeks at the checkpoint's discriminator keys (spectral_norm leaves
+  # ``weight_orig`` suffixes for the joint variant).
+  if "amp" in env_cfg.observations:
+    from mjlab.tasks.amp_velocity.variant import (
+      detect_variant_from_checkpoint,
+      sync_amp_variant,
+    )
+
+    resolved_variant = cfg.amp_variant
+    if resolved_variant == "auto":
+      if TRAINED_MODE and resume_path is not None:
+        ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+        detected = detect_variant_from_checkpoint(ckpt)
+        resolved_variant = detected if detected is not None else "body"
+        print(f"[INFO] AMP variant auto-detected from checkpoint: {resolved_variant}")
+      else:
+        resolved_variant = "body"
+    if getattr(agent_cfg, "amp", None) is not None:
+      agent_cfg.amp.variant = resolved_variant  # type: ignore[attr-defined]
+    sync_amp_variant(env_cfg, agent_cfg)
 
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
