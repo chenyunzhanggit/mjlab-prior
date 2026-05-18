@@ -816,7 +816,21 @@ def _make_g1_forward_lidar_sensor() -> RayCastSensorCfg:
     # ball geom is in the default group 0 of the soccer-ball spec, so it
     # registers as a hit.
     include_geom_groups=None,
-    debug_vis=False,  # Set True locally to inspect rays in viser.
+    # ``debug_vis=True`` makes viser auto-create a toggle GUI for this
+    # sensor (sidebar → Sensor debug viz → pelvis_forward_lidar).
+    # When enabled at play time the viewer renders one small cyan
+    # sphere per ray hit (176 max), so you can literally watch the
+    # ball/ground show up in the policy's depth signal. ``show_rays=True``
+    # additionally draws all 176 arrows — useful for confirming sensor
+    # orientation but very cluttered for 176-ray inference.
+    debug_vis=True,
+    viz=RayCastSensorCfg.VizCfg(
+      hit_color=(0.0, 1.0, 0.0, 0.8),
+      miss_color=(1.0, 0.0, 0.0, 0.2),
+      hit_sphere_color=(0.0, 1.0, 1.0, 0.9),
+      hit_sphere_radius=0.3,
+      show_rays=False,  # Flip to True if you want to see ray arrows.
+    ),
   )
 
 
