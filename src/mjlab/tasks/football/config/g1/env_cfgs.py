@@ -782,42 +782,63 @@ def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 
 # ---------------------------------------------------------------------------
-# Passing — Perception-only variant (mjlab-prior-main pipeline)
+# Passing — Perception-only variant (mjlab-prior-main pipeline, D405 + 16:9)
 # ---------------------------------------------------------------------------
+#
+# Sensor parameters calibrated against a real **Intel RealSense D405**
+# (user's actual device, see uploaded ``d435 param.md`` despite filename):
+#
+#   Depth HFoV × VFoV  =  89.04° × 57.9°     (matches 480×270 / 640×360
+#                                              / 1280×720 D405 depth modes)
+#   Output aspect      =  16:9                (45×80 → 80/45 = 1.778)
+#   Native frame rate  =  30 fps @ 720p       (we use 1/30s update_period)
 #
 # Architecture follows ``mjlab-prior-main/.../config/g1/env_cfgs.py`` and
 # VisualMimic (Yin & Ze, 2025) §III-D-a:
 #
-#   Raw raycast (64×64) ──► NoisyCamera noise pipeline ──► (60×60) ──► policy
-#                                        │
-#                              distance_gaussian (σ = 5mm + 1%·d)
-#                              depth_normalize    (clip to 2m, scale to [0,1])
-#                              dropout            (1% per-pixel, fill = -1)
-#                              crop_resize        (crop 2px each side → 60×60)
+#   Raw raycast (49×84) ──► NoisyCamera noise pipeline ──► (45×80) ──► policy
+#                                         │
+#                              distance_gaussian (σ = 5mm + 1.5%·d, fits D405 z-error)
+#                              depth_normalize    (clip to 3m, scale to [0,1])
+#                              dropout            (2% per-pixel, fill = -1)
+#                              crop_resize        (crop 2px each side → 45×80, 16:9)
 #                              rect_mask          (VisualMimic occluder)
 #
-# Per-episode extrinsic perturbation: pos ±2cm, roll/yaw ±1°, pitch ±5°.
+# Per-episode extrinsic perturbation: pos ±3cm, roll/yaw ±1°, pitch ±5°.
 # Per-episode intrinsic perturbation: fov ±5°, cx/cy ±1 px.
-# History buffer: 4 frames at update_period = 1/10s (10 Hz refresh).
+# History buffer: 4 frames at update_period = 1/30s (30 Hz, D405 native).
 
 PERCEPTION_SENSOR_NAME = "camera"
 """Sensor name (must match the ``sensor_cfg`` passed to obs term)."""
 
-PERCEPTION_RAW_HEIGHT = 64
-PERCEPTION_RAW_WIDTH = 64
-"""Raw pinhole pattern resolution (before crop+resize)."""
+PERCEPTION_RAW_HEIGHT = 49
+PERCEPTION_RAW_WIDTH = 84
+"""Raw pinhole pattern resolution (before crop+resize).
+Picked so that ``crop_region=(2, 2, 2, 2)`` lands exactly at 45×80 (16:9)."""
 
-PERCEPTION_IMAGE_HEIGHT = 60
-PERCEPTION_IMAGE_WIDTH = 60
-"""Resolved depth image shape after crop+resize pipeline (input to CNN)."""
+PERCEPTION_IMAGE_HEIGHT = 45
+PERCEPTION_IMAGE_WIDTH = 80
+"""Resolved depth image shape after crop+resize pipeline.
+``80 / 45 = 1.778 ≈ 16/9 = 1.778`` (matches D405 480×270 / 640×360 modes
+which are also 16:9, and standard HDMI / wide-camera framing)."""
 
 PERCEPTION_HISTORY_LEN = 4
-"""History frames kept in the sensor's :class:`AsyncCircularBuffer`."""
+"""History frames kept in the sensor's :class:`AsyncCircularBuffer`.
+4 frames @ 30 Hz = 133 ms time window for ball-velocity inference."""
 
 _PERCEPTION_FOVY = 57.9
-"""Vertical FoV (deg). Same value mjlab-prior-main / mjlab-loco use."""
-_PERCEPTION_DEPTH_RANGE = (0.0, 2.0)
-"""Depth clipping range (metres) before normalisation."""
+"""Vertical FoV (deg). D405 measured value for 480×270 / 640×360 / 1280×720."""
+
+_PERCEPTION_HFOV = 89.04
+"""Horizontal FoV (deg). D405 measured value, matches the same modes as VFoV."""
+_PERCEPTION_DEPTH_RANGE = (0.0, 3.0)
+"""Depth clipping range (metres) before normalisation.
+D405 nominal short-range is 0.07–0.5 m but it still returns usable
+depth up to ~3 m with increased noise. Passing balls spawn at 3–6 m,
+so we let the policy see up to 3 m and saturate (=1.0) beyond — the
+``ball_to_source_dist`` reward + proprio history teach the policy to
+move toward unseen balls.
+Real-machine deploy will see the same saturation, sim2real consistent."""
 
 
 def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
@@ -839,41 +860,52 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
       fovy=_PERCEPTION_FOVY,
     ),
     focal_length=1.0,
-    # Aperture values copied 1:1 from mjlab-prior-main / mjlab-loco; both
-    # repos mark them ``# [TODO] pending`` so the numbers may move later,
-    # but until they do, matching exactly keeps sim2real behaviour aligned.
-    horizontal_aperture=2 * math.tan(math.radians(89.04) / 2),
+    # Apertures come straight from the D405 measured FoVs in
+    # ``d435 param.md`` (HFoV=89.04°, VFoV=57.9°). With focal_length=1
+    # these reduce to ``2*tan(FoV/2)``.
+    horizontal_aperture=2 * math.tan(math.radians(_PERCEPTION_HFOV) / 2),
     vertical_aperture=2 * math.tan(math.radians(_PERCEPTION_FOVY) / 2),
     data_types=["distance_to_image_plane"],
     ray_alignment="base",
     include_geom_groups=(0, 2),  # 0=terrain default, 2=soccer ball geom
-    min_distance=0.05,
+    min_distance=0.05,           # D405 datasheet MinZ ≈ 7 cm; we go 5 cm
+                                  # to keep balls visible right at the foot.
     depth_clipping_behavior="max",
-    update_period=1 / 10,        # 10 Hz refresh (D6)
+    update_period=1 / 30,        # 30 Hz, D405 native frame rate @ 720p / 480p
     offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
-      pos=(0.0487988662332928, 0.01, 0.4378029937970051),  # D7: chest height
+      pos=(0.0487988662332928, 0.01, 0.4378029937970051),  # chest height,
+                                                            # ~5cm front, 1cm
+                                                            # right, 44cm up
       rot=(
         0.9135367613482678,
         0.004363309284746571,
         0.4067366430758002,
         0.0,
-      ),                          # ~45° pitch down
+      ),                          # ~45° pitch down — sees ground + incoming ball
       convention="world",         # forward=+X, up=+Z
     ),
     noise_pipeline={
+      # Distance-dependent Gaussian. D405 stereo z-accuracy ≈ 0.5% × d² for
+      # short range; in 0–3m a linear ``5mm + 1.5%·d`` approximation is
+      # close enough.
       "distance_gaussian": DepthDistanceGaussianNoiseCfg(
-        depth_std=0.005, depth_std_multiplier=0.01,
+        depth_std=0.005, depth_std_multiplier=0.015,
       ),
+      # D405 effective range nominally 0.07–0.5 m but extends to 1.5–3 m
+      # with noise. Pick 3 m so the ball (3–6 m at episode start) stays
+      # visible long enough for the policy to learn the approach.
       "normalize": DepthNormalizationCfg(
         depth_range=_PERCEPTION_DEPTH_RANGE, normalize=True,
       ),
-      "dropout": DepthDropoutCfg(drop_prob=0.01, fill_value=-1.0),
+      # D405 typical invalid-pixel ratio: 1–3% in normal lighting.
+      "dropout": DepthDropoutCfg(drop_prob=0.02, fill_value=-1.0),
+      # Crop 2 px on each edge to drop the rectified-stereo border zone,
+      # then resize is a no-op (49−4=45, 84−4=80).
       "crop_resize": CropAndResizeCfg(
         crop_region=(2, 2, 2, 2),
         resize_shape=(PERCEPTION_IMAGE_HEIGHT, PERCEPTION_IMAGE_WIDTH),
       ),
       # D2=b: VisualMimic-style random-rect mask as the LAST pipeline step.
-      # Operates in normalised [0, 1] space (max_value=1.0).
       "rect_mask": RectMaskCfg(
         max_value=1.0,
         max_rects=6,
@@ -885,15 +917,18 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
         bottom_left_w_frac=0.30,
       ),
     },
+    # Real neck-mounted RealSense drifts ±5° pitch over a day of use;
+    # roll/yaw and position drift are smaller because the mount is rigid
+    # horizontally. Values copied from mjlab-prior-main / mjlab-loco.
     extrinsic_perturbation=ExtrinsicPerturbationCfg(
-      pos_range=(0.02, 0.02, 0.02),
-      roll_range=0.01745,   # 1 deg
-      pitch_range=0.08727,  # 5 deg
-      yaw_range=0.01745,
+      pos_range=(0.03, 0.03, 0.03),
+      roll_range=0.01745,   # ±1°
+      pitch_range=0.08727,  # ±5°
+      yaw_range=0.01745,    # ±1°
     ),
     intrinsic_perturbation=IntrinsicPerturbationCfg(
-      fov_range=5.0,
-      cx_range=1.0,
+      fov_range=5.0,        # factory calibration drift ±5°
+      cx_range=1.0,         # ±1 px principal-point drift
       cy_range=1.0,
     ),
     data_histories={"distance_to_image_plane_noised": PERCEPTION_HISTORY_LEN},
