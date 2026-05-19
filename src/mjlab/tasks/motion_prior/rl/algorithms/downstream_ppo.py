@@ -66,6 +66,7 @@ class _DownStreamRolloutStorage:
     critic_obs_shape: tuple[int, ...],
     action_shape: tuple[int, ...],
     device: str | torch.device,
+    depth_obs_shape: tuple[int, ...] | None = None,
   ) -> None:
     self.num_envs = num_envs
     self.num_steps = num_steps
@@ -74,6 +75,13 @@ class _DownStreamRolloutStorage:
     self.policy_obs = torch.zeros(num_steps, num_envs, *policy_obs_shape, device=device)
     self.prop_obs = torch.zeros(num_steps, num_envs, *prop_obs_shape, device=device)
     self.critic_obs = torch.zeros(num_steps, num_envs, *critic_obs_shape, device=device)
+    # Optional 4-D depth buffer (only allocated when the env exposes a
+    # ``"depth"`` obs group). Shape: ``(T, N, C, H, W)``.
+    self.depth_obs: torch.Tensor | None = (
+      torch.zeros(num_steps, num_envs, *depth_obs_shape, device=device)
+      if depth_obs_shape is not None
+      else None
+    )
     self.actions = torch.zeros(num_steps, num_envs, *action_shape, device=device)
     self.rewards = torch.zeros(num_steps, num_envs, device=device)
     self.dones = torch.zeros(num_steps, num_envs, device=device, dtype=torch.float32)
@@ -100,6 +108,7 @@ class _DownStreamRolloutStorage:
     actions_log_prob: torch.Tensor,
     mu: torch.Tensor,
     sigma: torch.Tensor,
+    depth_obs: torch.Tensor | None = None,
   ) -> None:
     if self.step >= self.num_steps:
       raise RuntimeError("rollout buffer overflow; call clear() first")
@@ -107,6 +116,11 @@ class _DownStreamRolloutStorage:
     self.policy_obs[i] = policy_obs
     self.prop_obs[i] = prop_obs
     self.critic_obs[i] = critic_obs
+    if self.depth_obs is not None:
+      assert depth_obs is not None, (
+        "storage allocated a depth buffer but no depth_obs was provided"
+      )
+      self.depth_obs[i] = depth_obs
     self.actions[i] = actions
     self.rewards[i] = rewards.float()
     self.dones[i] = dones.float()
@@ -154,6 +168,10 @@ class _DownStreamRolloutStorage:
       "mu": self.mu.reshape(n_total, *self.mu.shape[2:]),
       "sigma": self.sigma.reshape(n_total, *self.sigma.shape[2:]),
     }
+    if self.depth_obs is not None:
+      flat["depth_obs"] = self.depth_obs.reshape(
+        n_total, *self.depth_obs.shape[2:]
+      )
     for _ in range(num_epochs):
       for mb in range(num_mini_batches):
         idx = indices[mb * batch_size : (mb + 1) * batch_size]
@@ -187,6 +205,7 @@ class DownStreamPPO:
     policy_obs_shape: tuple[int, ...],
     prop_obs_shape: tuple[int, ...],
     critic_obs_shape: tuple[int, ...],
+    depth_obs_shape: tuple[int, ...] | None = None,
   ) -> None:
     self.storage = _DownStreamRolloutStorage(
       num_envs=num_envs,
@@ -196,6 +215,7 @@ class DownStreamPPO:
       critic_obs_shape=critic_obs_shape,
       action_shape=(self.policy.latent_dim,),
       device=self.device,
+      depth_obs_shape=depth_obs_shape,
     )
 
   # ---------- rollout ---------- #
@@ -205,10 +225,20 @@ class DownStreamPPO:
     policy_obs: torch.Tensor,
     prop_obs: torch.Tensor,
     critic_obs: torch.Tensor,
+    depth_obs: torch.Tensor | None = None,
   ) -> torch.Tensor:
-    """Sample one transition. Returns ``recons_actions`` for env.step."""
+    """Sample one transition. Returns ``recons_actions`` for env.step.
+
+    ``depth_obs`` is forwarded to vision-aware policies whose
+    :meth:`act` accepts a third tensor; all-MLP policies ignore it.
+    """
     assert self.storage is not None
-    recons_actions, raw_action = self.policy.act(policy_obs, prop_obs)
+    if depth_obs is not None:
+      recons_actions, raw_action = self.policy.act(
+        policy_obs, prop_obs, depth_obs
+      )
+    else:
+      recons_actions, raw_action = self.policy.act(policy_obs, prop_obs)
     log_prob = self.policy.get_actions_log_prob(raw_action).detach()
     value = self.policy.evaluate(critic_obs).detach()
     mu = self.policy.action_mean.detach()
@@ -224,6 +254,8 @@ class DownStreamPPO:
       mu=mu,
       sigma=sigma,
     )
+    if depth_obs is not None:
+      self._pending["depth_obs"] = depth_obs.detach()
     return recons_actions.detach()
 
   def process_env_step(self, rewards: torch.Tensor, dones: torch.Tensor) -> None:
@@ -249,8 +281,14 @@ class DownStreamPPO:
     for batch in self.storage.mini_batch_generator(
       cfg.num_mini_batches, cfg.num_learning_epochs
     ):
-      # Re-evaluate actor / critic at current parameters.
-      self.policy.update_distribution(batch["policy_obs"])
+      # Re-evaluate actor / critic at current parameters. Vision-aware
+      # policies override ``update_distribution`` to take a second
+      # ``depth_image`` argument; all-MLP policies use the single-arg
+      # signature.
+      if "depth_obs" in batch:
+        self.policy.update_distribution(batch["policy_obs"], batch["depth_obs"])
+      else:
+        self.policy.update_distribution(batch["policy_obs"])
       log_prob_batch = self.policy.get_actions_log_prob(batch["actions"])
       mu_batch = self.policy.action_mean
       sigma_batch = self.policy.action_std

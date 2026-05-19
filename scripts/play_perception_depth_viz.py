@@ -305,22 +305,41 @@ def _install_depth_hook(
     sensor = env.scene.sensors.get(sensor_name)
     if sensor is None:
       return ok
-    # ``sensor.data.distances``: [B, N_total]. Take env 0.
-    distances = sensor.data.distances[0].detach().cpu().numpy()
-    max_d = float(sensor.cfg.max_distance)
-    distances = np.where(distances < 0, max_d, distances)
 
-    # Infer (Ny, Nx) from the local-offset cache (works for GridPattern,
-    # PinholeCamera and any future pattern that lays out via
-    # ``meshgrid(x, y, indexing="xy")`` + row-major flatten).
-    offsets = sensor._local_offsets
-    assert offsets is not None, "RayCastSensor not initialised yet"
-    nx = int(offsets[:, 0].unique().numel())
-    n_total = distances.shape[0]
-    ny = n_total // nx
-    if ny * nx != n_total:
-      ny, nx = 1, n_total
-    depth_2d = distances.reshape(ny, nx)
+    # NoisyGroupedRayCasterCamera path: the post-noise depth image
+    # lives in ``sensor.data.output["distance_to_image_plane_noised"]``,
+    # already crop+resize'd and normalised to [0, 1]. -1 marks dropped
+    # pixels (DepthDropout fill_value).
+    data_key = "distance_to_image_plane_noised"
+    if hasattr(sensor.data, "output") and data_key in sensor.data.output:
+      img = sensor.data.output[data_key][0].detach().cpu().numpy()
+      depth_2d = img[..., 0] if img.ndim == 3 and img.shape[-1] == 1 else img
+      max_d = 1.0  # already normalised
+      depth_2d = np.where(depth_2d < 0, max_d, depth_2d)
+    else:
+      # Legacy RayCastSensor (flat distances + offset-grid pattern).
+      distances = sensor.data.distances[0].detach().cpu().numpy()
+      max_d = float(sensor.cfg.max_distance)
+      distances = np.where(distances < 0, max_d, distances)
+      pattern = sensor.cfg.pattern
+      n_total = distances.shape[0]
+      if hasattr(pattern, "width") and hasattr(pattern, "height"):
+        nx = int(pattern.width)
+        ny = int(pattern.height)
+        if nx * ny != n_total:
+          nx, ny = 0, 0
+      else:
+        nx, ny = 0, 0
+      if nx == 0 or ny == 0:
+        offsets = sensor._local_offsets
+        assert offsets is not None, "RayCastSensor not initialised yet"
+        nx_guess = int(offsets[:, 0].unique().numel())
+        if nx_guess > 1 and n_total % nx_guess == 0:
+          nx = nx_guess
+          ny = n_total // nx
+        else:
+          ny, nx = 1, n_total
+      depth_2d = distances.reshape(ny, nx)
     window.update(depth_2d, max_distance=max_d)
     return ok
 
@@ -338,7 +357,7 @@ def _install_depth_hook(
 
 def main() -> None:
   argv = list(sys.argv)
-  sensor_name = _pop_arg(argv, "--sensor-name", "pelvis_forward_camera")
+  sensor_name = _pop_arg(argv, "--sensor-name", "camera")
   stride = int(_pop_arg(argv, "--depth-stride", "1"))
   cmap = _pop_arg(argv, "--depth-cmap", "turbo")
   window_size = int(_pop_arg(argv, "--depth-window-size", "640"))

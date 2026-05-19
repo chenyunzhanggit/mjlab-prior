@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -144,3 +145,151 @@ class NoiseModelWithAdditiveBiasCfg(
       raise ValueError(
         "bias_noise_cfg must be specified for NoiseModelWithAdditiveBiasCfg"
       )
+
+
+# ============================================================================
+# Image noise pipeline (ported from mjlab-prior-main:utils/noise/noise_cfg.py).
+#
+# Each ImageNoiseCfg subclass describes one stage in a depth-image noise
+# pipeline that lives **inside** the camera sensor (NoisyCameraMixin runs
+# them in dict-insertion order on the sensor's output buffer). The signature
+# of every ``func`` is:
+#
+#     func(data: torch.Tensor, cfg: ImageNoiseCfg, env_ids) -> torch.Tensor
+#
+# ``data`` shape is ``(N, H, W, C)`` (channels-last, mjlab/IsaacLab convention).
+# ============================================================================
+
+
+@dataclass(kw_only=True)
+class ImageNoiseCfg:
+  """Base configuration for image noise / transform terms."""
+
+  func: (
+    Callable[
+      [torch.Tensor, "ImageNoiseCfg", torch.Tensor | Sequence[int]], torch.Tensor
+    ]
+    | type[noise_model.ImageNoiseModel]
+  ) = noise_model.ImageNoiseModel
+  """Callable that applies the transform. Signature: (data, cfg, env_ids) -> data."""
+
+  device: str | torch.device = "cpu"
+
+
+@dataclass(kw_only=True)
+class DepthNormalizationCfg(ImageNoiseCfg):
+  """Clip depth to a range and optionally normalize to [0, 1]."""
+
+  depth_range: tuple[float, float] = (0.0, 10.0)
+  normalize: bool = True
+  output_range: tuple[float, float] = (0.0, 1.0)
+  func: Callable[
+    [torch.Tensor, "DepthNormalizationCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.depth_normalization
+
+
+@dataclass(kw_only=True)
+class CropAndResizeCfg(ImageNoiseCfg):
+  """Crop border pixels and resize the image."""
+
+  crop_region: tuple[int, int, int, int] = (0, 0, 0, 0)
+  """(top, bottom, left, right) pixels to crop from each edge."""
+
+  resize_shape: tuple[int, int] | None = None
+  """Output (height, width) after resize. None = no resize."""
+
+  func: Callable[
+    [torch.Tensor, "CropAndResizeCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.crop_and_resize
+
+
+@dataclass(kw_only=True)
+class DepthDistanceGaussianNoiseCfg(ImageNoiseCfg):
+  """Distance-dependent Gaussian noise.
+
+  ``sigma = depth_std + depth * depth_std_multiplier``
+
+  Applied in meter space (before normalization). Matches real depth camera
+  behaviour where noise grows with distance::
+
+    sigma = 0.005 + 0.01 * d  →  at 2 m: sigma ≈ 0.025 m
+  """
+
+  depth_std: float = 0.005
+  """Base noise std (meters). Independent of distance."""
+
+  depth_std_multiplier: float = 0.01
+  """Per-meter noise growth. Total std = depth_std + depth * depth_std_multiplier."""
+
+  func: Callable[
+    [torch.Tensor, "DepthDistanceGaussianNoiseCfg", torch.Tensor | Sequence[int]],
+    torch.Tensor,
+  ] = noise_model.depth_distance_gaussian_noise
+
+
+@dataclass(kw_only=True)
+class DepthDropoutCfg(ImageNoiseCfg):
+  """Randomly invalidate depth pixels to simulate missing returns.
+
+  Each pixel is independently dropped with probability ``drop_prob``.
+  Applied after normalization; dropped pixels receive ``fill_value``
+  (default -1.0) which lies outside [0, 1] so the policy can distinguish
+  them from real returns.
+  """
+
+  drop_prob: float = 0.01
+  """Probability in [0, 1) that a pixel is dropped."""
+
+  fill_value: float = -1.0
+  """Value for dropped pixels. -1.0 is outside normalized [0, 1] range."""
+
+  func: Callable[
+    [torch.Tensor, "DepthDropoutCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.depth_dropout
+
+
+@dataclass(kw_only=True)
+class RectMaskCfg(ImageNoiseCfg):
+  """VisualMimic-style random-rectangle mask augmentation (D2=b).
+
+  On each call, with independent Bernoulli for every env, stamps up to
+  ``max_rects`` axis-aligned rectangles onto the depth image. Each rect's
+  fill is uniformly drawn from {white = ``max_value``, black = 0,
+  gray ~ U(0, ``max_value``)} to mimic three real-camera failure modes
+  (saturated white, dead pixels, smoothed-out blur). Optionally also
+  stamps a fixed bottom-left rectangle to simulate the robot's chin /
+  shoulder occluder seen on a chest-mounted RealSense (VisualMimic
+  §III-D-a).
+
+  Applied **after** normalization (so ``max_value`` is the normalized
+  high end, typically 1.0).
+  """
+
+  max_value: float = 1.0
+  """Fill value for "white" mask and upper bound of gray. Should match
+  the upper end of the depth pipeline's normalized range."""
+
+  max_rects: int = 6
+  """Maximum number of random rectangles per env."""
+
+  prob_per_slot: float = 0.10
+  """Per-rect Bernoulli probability."""
+
+  max_h_frac: float = 0.30
+  """Each rect's max height as a fraction of image H."""
+
+  max_w_frac: float = 0.30
+  """Each rect's max width as a fraction of image W."""
+
+  bottom_left_prob: float = 0.20
+  """Probability of stamping the fixed bottom-left occluder."""
+
+  bottom_left_h_frac: float = 0.40
+  """Bottom-left occluder height fraction."""
+
+  bottom_left_w_frac: float = 0.30
+  """Bottom-left occluder width fraction."""
+
+  func: Callable[
+    [torch.Tensor, "RectMaskCfg", torch.Tensor | Sequence[int]], torch.Tensor
+  ] = noise_model.rect_mask

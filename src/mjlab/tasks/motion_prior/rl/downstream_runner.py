@@ -72,6 +72,14 @@ class DownStreamOnPolicyRunner:
     self._prop_obs_shape = tuple(prop_obs.shape[1:])
     self._critic_obs_shape = tuple(critic_obs.shape[1:])
 
+    # Optional vision branch: env_cfg with a ``depth`` obs group triggers
+    # the CNN-aware policy. Shape is ``(C, H, W)``; the runner records it
+    # so it can size the storage buffer and pass dims to the policy.
+    self._has_depth = "depth" in obs0.keys()
+    self._depth_obs_shape: tuple[int, ...] | None = (
+      tuple(_t(obs0, "depth").shape[1:]) if self._has_depth else None
+    )
+
     # ---- Build policy ---------------------------------------------------- #
     # play.py doesn't expose --agent.* flags, so env var is the only way to
     # inject the motion-prior ckpt path into a play-time runner. Train.py
@@ -121,6 +129,7 @@ class DownStreamOnPolicyRunner:
       policy_obs_shape=self._policy_obs_shape,
       prop_obs_shape=self._prop_obs_shape,
       critic_obs_shape=self._critic_obs_shape,
+      depth_obs_shape=self._depth_obs_shape,
     )
 
     self.num_steps_per_env = int(train_cfg.get("num_steps_per_env", 24))
@@ -260,8 +269,9 @@ class DownStreamOnPolicyRunner:
       policy_obs = _t(obs, "policy")
       prop_obs = _t(obs, "motion_prior_obs")
       critic_obs = _t(obs, "critic")
+      depth_obs = _t(obs, "depth") if self._has_depth else None
 
-      action = self.alg.act(policy_obs, prop_obs, critic_obs)
+      action = self.alg.act(policy_obs, prop_obs, critic_obs, depth_obs=depth_obs)
       obs, rew, dones, extras = self.env.step(action)
       self.alg.process_env_step(rew, dones)
       self._track_episode_stats(rew, dones)
@@ -455,13 +465,26 @@ class DownStreamOnPolicyRunner:
     self,
     device: str | torch.device | None = None,
   ):
-    """Return ``(obs_td) -> action`` for ``mjlab.scripts.play``."""
+    """Return ``(obs_td) -> action`` for ``mjlab.scripts.play``.
+
+    Threads the optional ``depth`` group through to vision-aware
+    policies (whose ``policy_inference`` accepts a third arg). All-MLP
+    policies use the legacy two-arg signature.
+    """
     if device is not None:
       self.policy.to(device)
     self.policy.eval()
 
+    has_depth = self._has_depth
+
     def _policy(obs_td: TensorDict) -> torch.Tensor:
       with torch.no_grad():
+        if has_depth:
+          return self.policy.policy_inference(
+            _t(obs_td, "policy"),
+            _t(obs_td, "motion_prior_obs"),
+            _t(obs_td, "depth"),
+          )
         return self.policy.policy_inference(
           _t(obs_td, "policy"), _t(obs_td, "motion_prior_obs")
         )
@@ -493,12 +516,18 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
     policy_cfg: dict,
     device: str | torch.device,
   ):
-    # If ``image_height`` / ``image_width`` are set on the policy cfg, the
-    # actor uses a CNN branch for the flat depth-image suffix of policy_obs
-    # (see ``DownStreamVQVisionPolicy``). Otherwise fall back to the
-    # all-MLP actor.
-    img_h = policy_cfg.get("image_height")
-    img_w = policy_cfg.get("image_width")
+    # Vision-aware actor is enabled when the env has a ``depth`` obs group
+    # (the runner recorded its shape in ``self._depth_obs_shape``). The
+    # image_height / image_width from the policy cfg are used as fallback
+    # if for some reason the env didn't expose the depth group at __init__
+    # time (e.g. running an ablation without depth in the same code path).
+    depth_shape = getattr(self, "_depth_obs_shape", None)
+    if depth_shape is not None:
+      img_channels, img_h, img_w = depth_shape
+    else:
+      img_channels = int(policy_cfg.get("image_channels", 1))
+      img_h = policy_cfg.get("image_height")
+      img_w = policy_cfg.get("image_width")
     use_vision = img_h is not None and img_w is not None
 
     common_kwargs = dict(
@@ -530,6 +559,7 @@ class DownStreamVQOnPolicyRunner(DownStreamOnPolicyRunner):
       return DownStreamVQVisionPolicy(
         image_height=int(img_h),
         image_width=int(img_w),
+        image_channels=int(img_channels),
         depth_embedding_dim=int(policy_cfg.get("depth_embedding_dim", 64)),
         depth_channels=tuple(policy_cfg.get("depth_channels", (16, 32, 32))),
         **common_kwargs,

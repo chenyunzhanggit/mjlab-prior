@@ -46,29 +46,19 @@ def unitree_g1_passing_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
 
 
 def unitree_g1_passing_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
-  """Same PPO hyperparams as plain passing, but the policy is the
-  vision-aware :class:`DownStreamVQVisionPolicy`: the depth-image
-  suffix of policy_obs is routed through a small CNN encoder before
-  being concatenated with proprio+cmd and fed to an MLP.
+  """Vision-aware :class:`DownStreamVQVisionPolicy` runner cfg.
 
-  CNN config follows VisualMimic-style recipes for low-resolution
-  depth inputs: 3 strided convs (16→32→32), then Linear projection to
-  a 64-dim embedding. The MLP head reuses the standard
-  ``[512, 256, 128]`` widths used by the all-MLP downstream baseline.
+  Image shape is **auto-detected** from the env's ``depth`` obs group at
+  runtime (see ``DownStreamVQOnPolicyRunner._build_policy``); the
+  ``image_height`` / ``image_width`` fields on the policy cfg are only
+  used as fallback when the env doesn't expose a depth group. Here we
+  leave them at the defaults (None) since the env_cfg always provides
+  one for this task.
 
-  ``image_height`` / ``image_width`` toggle the runner into vision mode
-  (see ``DownStreamVQOnPolicyRunner._build_policy``). Keeping them None
-  would fall back to the all-MLP actor (broken on this task: it'd try
-  to feed 3600 raw depth pixels through a dense Linear layer).
+  CNN: 3 strided convs (16→32→32) → Linear → 64-d embedding, mirroring
+  the topology mjlab-prior-main / mjlab-loco use for the same input size.
   """
-  from mjlab.tasks.football.config.g1.env_cfgs import (
-    PERCEPTION_IMAGE_HEIGHT,
-    PERCEPTION_IMAGE_WIDTH,
-  )
-
   cfg = _default_vq_runner_cfg("g1_football_passing_perception_vq")
-  cfg.policy.image_height = PERCEPTION_IMAGE_HEIGHT
-  cfg.policy.image_width = PERCEPTION_IMAGE_WIDTH
   cfg.policy.depth_embedding_dim = 64
   cfg.policy.depth_channels = (16, 32, 32)
   return cfg

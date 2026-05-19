@@ -24,6 +24,8 @@ without height_scan.
 
 from __future__ import annotations
 
+import math
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.event_manager import EventTermCfg
@@ -37,13 +39,23 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import (
   ContactMatch,
   ContactSensorCfg,
+  ExtrinsicPerturbationCfg,
   GridPatternCfg,
+  IntrinsicPerturbationCfg,
+  NoisyGroupedRayCasterCameraCfg,
   ObjRef,
+  PinholeCameraPatternCfg,
   RayCastSensorCfg,
+)
+from mjlab.utils.noise import (
+  CropAndResizeCfg,
+  DepthDistanceGaussianNoiseCfg,
+  DepthDropoutCfg,
+  DepthNormalizationCfg,
+  RectMaskCfg,
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.tasks.football import mdp as football_mdp
-from mjlab.tasks.football.mdp.sensors import ForwardPinholeCameraPatternCfg
 from mjlab.tasks.football.soccer_ball import (
   SOCCER_BALL_RADIUS,
   SoccerBallParams,
@@ -770,58 +782,121 @@ def unitree_g1_passing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 
 # ---------------------------------------------------------------------------
-# Passing — Perception-only variant
+# Passing — Perception-only variant (mjlab-prior-main pipeline)
 # ---------------------------------------------------------------------------
+#
+# Architecture follows ``mjlab-prior-main/.../config/g1/env_cfgs.py`` and
+# VisualMimic (Yin & Ze, 2025) §III-D-a:
+#
+#   Raw raycast (64×64) ──► NoisyCamera noise pipeline ──► (60×60) ──► policy
+#                                        │
+#                              distance_gaussian (σ = 5mm + 1%·d)
+#                              depth_normalize    (clip to 2m, scale to [0,1])
+#                              dropout            (1% per-pixel, fill = -1)
+#                              crop_resize        (crop 2px each side → 60×60)
+#                              rect_mask          (VisualMimic occluder)
+#
+# Per-episode extrinsic perturbation: pos ±2cm, roll/yaw ±1°, pitch ±5°.
+# Per-episode intrinsic perturbation: fov ±5°, cx/cy ±1 px.
+# History buffer: 4 frames at update_period = 1/10s (10 Hz refresh).
 
-# Forward depth camera (RealSense-style) on the G1 pelvis. VisualMimic
-# (Yin & Ze, 2025) recipe — pinhole 80×45 depth → CNN encoder → concat
-# proprio → MLP, with random rectangular masking for sim2real robustness.
-_PERCEPTION_SENSOR = "pelvis_forward_camera"
-_PERCEPTION_CAMERA_WIDTH = 80
-_PERCEPTION_CAMERA_HEIGHT = 45
-_PERCEPTION_CAMERA_FOVY = 58.0  # vertical FoV; matches D435i default
-_PERCEPTION_MAX_DISTANCE = 5.0
-_PERCEPTION_NUM_RAYS = _PERCEPTION_CAMERA_WIDTH * _PERCEPTION_CAMERA_HEIGHT
+PERCEPTION_SENSOR_NAME = "camera"
+"""Sensor name (must match the ``sensor_cfg`` passed to obs term)."""
+
+PERCEPTION_RAW_HEIGHT = 64
+PERCEPTION_RAW_WIDTH = 64
+"""Raw pinhole pattern resolution (before crop+resize)."""
+
+PERCEPTION_IMAGE_HEIGHT = 60
+PERCEPTION_IMAGE_WIDTH = 60
+"""Resolved depth image shape after crop+resize pipeline (input to CNN)."""
+
+PERCEPTION_HISTORY_LEN = 4
+"""History frames kept in the sensor's :class:`AsyncCircularBuffer`."""
+
+_PERCEPTION_FOVY = 57.9
+"""Vertical FoV (deg). Same value mjlab-prior-main / mjlab-loco use."""
+_PERCEPTION_DEPTH_RANGE = (0.0, 2.0)
+"""Depth clipping range (metres) before normalisation."""
 
 
-def _make_g1_forward_lidar_sensor() -> RayCastSensorCfg:
-  """Forward-facing pinhole depth camera on the G1 pelvis (VisualMimic-style).
+def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
+  """Pelvis-mounted forward pinhole depth camera with VisualMimic-style
+  sim2real augmentation.
 
-  Pinhole rays diverge from one optical centre at the pelvis, fovy=58°,
-  aspect 16:9 → hfov ≈ 89°. 80 × 45 = 3600 rays. ``ray_alignment="base"``
-  ties the camera to the pelvis quaternion, so as the robot turns the
-  depth image rotates with it — same semantics as a chest-mounted RealSense.
-
-  The pattern is :class:`ForwardPinholeCameraPatternCfg` (a duck-typed
-  drop-in for mjlab's built-in ``PinholeCameraPatternCfg``) — needed
-  because the built-in one fires rays along -Z (MuJoCo camera convention)
-  and would point at the floor when attached to pelvis. The custom
-  variant fires along +X (forward) instead, with no robot-spec changes.
+  1:1 of mjlab-prior-main's ``_make_g1_depth_camera_cfg`` (originally from
+  ``mjlab-loco``). The ``OffsetCfg.convention="world"`` puts forward=+X /
+  up=+Z, then the ``rot=(w, x, y, z) = (0.914, 0.004, 0.407, 0)``
+  quaternion adds ~45° pitch down so the camera sees both the ground and
+  incoming ball.
   """
-  return RayCastSensorCfg(
-    name=_PERCEPTION_SENSOR,
+  return NoisyGroupedRayCasterCameraCfg(
+    name=PERCEPTION_SENSOR_NAME,
     frame=ObjRef(type="body", name="pelvis", entity="robot"),
-    pattern=ForwardPinholeCameraPatternCfg(  # type: ignore[arg-type]
-      width=_PERCEPTION_CAMERA_WIDTH,
-      height=_PERCEPTION_CAMERA_HEIGHT,
-      fovy=_PERCEPTION_CAMERA_FOVY,
+    pattern=PinholeCameraPatternCfg(
+      height=PERCEPTION_RAW_HEIGHT,
+      width=PERCEPTION_RAW_WIDTH,
+      fovy=_PERCEPTION_FOVY,
     ),
+    focal_length=1.0,
+    # Aperture values copied 1:1 from mjlab-prior-main / mjlab-loco; both
+    # repos mark them ``# [TODO] pending`` so the numbers may move later,
+    # but until they do, matching exactly keeps sim2real behaviour aligned.
+    horizontal_aperture=2 * math.tan(math.radians(89.04) / 2),
+    vertical_aperture=2 * math.tan(math.radians(_PERCEPTION_FOVY) / 2),
+    data_types=["distance_to_image_plane"],
     ray_alignment="base",
-    max_distance=_PERCEPTION_MAX_DISTANCE,
-    exclude_parent_body=True,
-    # Include all geom groups so the soccer ball geom registers as a hit.
-    include_geom_groups=None,
-    # ``debug_vis=True`` makes viser auto-create a toggle GUI for this
-    # sensor; default visualisation is the per-hit cyan spheres (no ray
-    # arrows — 3600 arrows is unusable).
-    debug_vis=True,
-    viz=RayCastSensorCfg.VizCfg(
-      hit_color=(0.0, 1.0, 0.0, 0.8),
-      miss_color=(1.0, 0.0, 0.0, 0.2),
-      hit_sphere_color=(0.0, 1.0, 1.0, 0.9),
-      hit_sphere_radius=0.15,
-      show_rays=False,
+    include_geom_groups=(0, 2),  # 0=terrain default, 2=soccer ball geom
+    min_distance=0.05,
+    depth_clipping_behavior="max",
+    update_period=1 / 10,        # 10 Hz refresh (D6)
+    offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
+      pos=(0.0487988662332928, 0.01, 0.4378029937970051),  # D7: chest height
+      rot=(
+        0.9135367613482678,
+        0.004363309284746571,
+        0.4067366430758002,
+        0.0,
+      ),                          # ~45° pitch down
+      convention="world",         # forward=+X, up=+Z
     ),
+    noise_pipeline={
+      "distance_gaussian": DepthDistanceGaussianNoiseCfg(
+        depth_std=0.005, depth_std_multiplier=0.01,
+      ),
+      "normalize": DepthNormalizationCfg(
+        depth_range=_PERCEPTION_DEPTH_RANGE, normalize=True,
+      ),
+      "dropout": DepthDropoutCfg(drop_prob=0.01, fill_value=-1.0),
+      "crop_resize": CropAndResizeCfg(
+        crop_region=(2, 2, 2, 2),
+        resize_shape=(PERCEPTION_IMAGE_HEIGHT, PERCEPTION_IMAGE_WIDTH),
+      ),
+      # D2=b: VisualMimic-style random-rect mask as the LAST pipeline step.
+      # Operates in normalised [0, 1] space (max_value=1.0).
+      "rect_mask": RectMaskCfg(
+        max_value=1.0,
+        max_rects=6,
+        prob_per_slot=0.10,
+        max_h_frac=0.30,
+        max_w_frac=0.30,
+        bottom_left_prob=0.20,
+        bottom_left_h_frac=0.40,
+        bottom_left_w_frac=0.30,
+      ),
+    },
+    extrinsic_perturbation=ExtrinsicPerturbationCfg(
+      pos_range=(0.02, 0.02, 0.02),
+      roll_range=0.01745,   # 1 deg
+      pitch_range=0.08727,  # 5 deg
+      yaw_range=0.01745,
+    ),
+    intrinsic_perturbation=IntrinsicPerturbationCfg(
+      fov_range=5.0,
+      cx_range=1.0,
+      cy_range=1.0,
+    ),
+    data_histories={"distance_to_image_plane_noised": PERCEPTION_HISTORY_LEN},
   )
 
 
@@ -835,68 +910,67 @@ def unitree_g1_passing_perception_env_cfg(
   ball state directly. Instead it sees:
 
   * ``passing_source_position`` — the task command ("kick the incoming
-    ball back to *this* location"), in body frame.
-  * ``ball_depth_image`` — a flat ``H*W = 45 * 80 = 3600`` depth image
-    from a forward pinhole camera on the pelvis. The flat layout is
-    row-major (``meshgrid(u, v, indexing="xy").flatten()``), so the
-    policy's CNN can ``view(-1, 1, 45, 80)`` to recover the 2D image.
+    ball back to *this* location"), in body frame. Lives in the 1-D
+    ``policy`` group along with proprio.
+  * ``depth_image`` — ``(B, 1, 60, 60)`` depth image from the pelvis
+    pinhole camera, with sim2real noise pipeline + per-episode
+    extrinsic / intrinsic perturbations + 4-frame history. Lives in its
+    own ``depth`` group because 4-D tensors can't share a flat concat
+    group with 1-D obs.
 
-  Critic obs are unchanged: ``ball_relative_position`` / ``ball_velocity``
-  / ``passing_source_position`` / ``ball_absolute_position`` (privileged)
-  — the standard PPO asymmetric actor-critic trick: the value function
-  gets oracle ball state for stable training, the policy doesn't.
+  Critic obs: ``ball_relative_position`` / ``ball_velocity`` /
+  ``passing_source_position`` / ``ball_absolute_position`` (privileged) —
+  the standard asymmetric actor-critic trick: the value function gets
+  oracle ball state for stable training, the policy doesn't.
 
-  Obs layout chosen so that ``ball_depth_image`` is the **last** entry
-  of the policy obs vector. This lets the vision-aware policy
-  (:class:`DownStreamVQVisionPolicy`) split ``obs[:, :-H*W]`` (proprio +
-  task cmd) from ``obs[:, -H*W:]`` (depth pixels) with a single slice.
-  Don't reorder the dict below without updating the policy accordingly.
+  D1=a, D2=b, D3=a, D4=a, D5=b, D6=b, D7=a, D8=a, D9=a, D10=a, D11=a.
   """
   cfg = unitree_g1_passing_env_cfg(play=play)
 
-  # Attach the forward depth camera to the existing sensor tuple.
-  cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_forward_lidar_sensor())
+  # Attach the noisy depth camera to the existing sensor tuple.
+  cfg.scene.sensors = (
+    *(cfg.scene.sensors or ()),
+    _make_g1_depth_camera_cfg(),
+  )
 
   enable_corruption = not play
 
-  # Build observations manually (NOT via ``_make_football_obs_groups``)
-  # because we need full control over the term insertion order. mjlab's
-  # ObservationGroupCfg concats terms in dict-insertion order.
+  # Reuse the shared motion-prior + proprio obs builders.
   motion_prior_obs = _make_motion_prior_obs_group(
     enable_corruption=enable_corruption, with_height_scan=False
   )
 
-  # Policy obs (in concat order):
-  #   passing_source_position (3) → proprio (372) → ball_depth_image (H*W)
+  # 1-D ``policy`` group: command + proprio. No depth.
   policy_terms: dict[str, ObservationTermCfg] = {
     "passing_source_position": ObservationTermCfg(
       func=football_mdp.passing_source_position,
       params={"command_name": "passing_commands"},
     ),
     **_make_proprio_terms(),
-    "ball_depth_image": ObservationTermCfg(
-      func=football_mdp.depth_image,
-      params={
-        "sensor_name": _PERCEPTION_SENSOR,
-        "scale": 1.0 / _PERCEPTION_MAX_DISTANCE,
-        "image_height": _PERCEPTION_CAMERA_HEIGHT,
-        "image_width": _PERCEPTION_CAMERA_WIDTH,
-        # Random rectangular masks during training only; disabled at play
-        # so the visualised depth image cleanly shows what the camera
-        # actually sees. The default knobs match VisualMimic §III-D-a.
-        "apply_mask": enable_corruption,
-      },
-      # Multiplicative Gaussian-like additive jitter on the scaled
-      # (normalised) depth; matches the magnitude VisualMimic uses
-      # implicitly via spatial filter residuals. 0.02 in [0,1] space ≈
-      # 10 cm at 5 m max range.
-      noise=Unoise(n_min=-0.02, n_max=0.02),
-    ),
   }
   policy = ObservationGroupCfg(
     terms=policy_terms,
     concatenate_terms=True,
     enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  # 4-D ``depth`` group. Sensor's noise pipeline already does normalisation /
+  # dropout / crop+resize / rect_mask, so ``enable_corruption=False`` (no
+  # obs-manager-side noise stacked on top).
+  depth = ObservationGroupCfg(
+    terms={
+      "depth_image": ObservationTermCfg(
+        func=envs_mdp.depth_image,
+        params={
+          "sensor_cfg": SceneEntityCfg(PERCEPTION_SENSOR_NAME),
+          "data_type": "distance_to_image_plane_noised",
+        },
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=False,
     nan_policy="warn",
     nan_check_per_term=True,
   )
@@ -937,14 +1011,8 @@ def unitree_g1_passing_perception_env_cfg(
   cfg.observations = {
     "motion_prior_obs": motion_prior_obs,
     "policy": policy,
+    "depth": depth,
     "critic": critic,
   }
 
   return cfg
-
-
-# Image shape exposed for the runner cfg / depth-viz script so they don't
-# duplicate the numbers.
-PERCEPTION_IMAGE_HEIGHT = _PERCEPTION_CAMERA_HEIGHT
-PERCEPTION_IMAGE_WIDTH = _PERCEPTION_CAMERA_WIDTH
-PERCEPTION_SENSOR_NAME = _PERCEPTION_SENSOR

@@ -27,7 +27,6 @@ from .observations import (
   ball_relative_position,
   ball_to_goal_vector,
   ball_velocity,
-  depth_image,
   dribbling_goal_position,
   passing_source_position,
 )
@@ -66,7 +65,6 @@ __all__ = [
   "ball_relative_position",
   "ball_to_goal_vector",
   "ball_velocity",
-  "depth_image",
   "dribbling_goal_position",
   "passing_source_position",
   "align_to_kick_reward",
