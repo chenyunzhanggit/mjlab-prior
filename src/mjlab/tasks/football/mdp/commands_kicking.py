@@ -43,13 +43,16 @@ class KickingGoalCommand(DribblingGoalCommand):
     if not env_indices:
       return
     # Single translucent green sphere at the goal location, matching the
-    # passing task's source-zone visualization style.
+    # passing-perception task's source-zone visualization style. The radius
+    # is derived from the goal mouth width (goal_width / 2 ≈ 1.83 m) so the
+    # marker visually spans the scoring range rather than a tiny point.
+    zone_radius = self.cfg.goal_width / 2.0
     for idx in env_indices:
       pos = self.goal_pos[idx].cpu().numpy().copy()
       pos[2] = 0.01
       visualizer.add_sphere(
         center=pos,
-        radius=0.3,
+        radius=zone_radius,
         color=(0.0, 1.0, 0.2, 0.35),
         label=f"kicking_goal_{idx}",
       )
