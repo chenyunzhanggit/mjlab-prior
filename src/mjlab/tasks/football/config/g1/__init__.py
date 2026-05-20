@@ -2,12 +2,16 @@
 
 from mjlab.tasks.football.config.g1.env_cfgs import (
   unitree_g1_dribbling_env_cfg,
+  unitree_g1_dribbling_perception_env_cfg,
   unitree_g1_kicking_env_cfg,
+  unitree_g1_kicking_perception_env_cfg,
   unitree_g1_passing_env_cfg,
   unitree_g1_passing_perception_env_cfg,
 )
 from mjlab.tasks.football.config.g1.rl_cfg import (
+  unitree_g1_dribbling_perception_vq_runner_cfg,
   unitree_g1_dribbling_vq_runner_cfg,
+  unitree_g1_kicking_perception_vq_runner_cfg,
   unitree_g1_kicking_vq_runner_cfg,
   unitree_g1_passing_perception_vq_runner_cfg,
   unitree_g1_passing_vq_runner_cfg,
@@ -46,14 +50,36 @@ register_mjlab_task(
   runner_cls=DownStreamVQOnPolicyRunner,
 )
 
-# Passing-Perception — same task as Passing but the policy cannot read
-# ball state directly. A 176-dim forward LiDAR depth scan replaces
-# ``ball_relative_position`` + ``ball_velocity`` in the policy obs.
-# Critic keeps the privileged ball state for asymmetric A2C training.
+# ===========================================================================
+# Perception-only variants — policy reads a pelvis depth camera (D405 16:9)
+# instead of direct ball state. Critic keeps privileged ball state
+# (asymmetric actor-critic). All three share the vision-aware
+# DownStreamVQVisionPolicy (CNN depth encoder + MLP).
+# ===========================================================================
+
+# Passing-Perception — incoming ball, redirect into source zone, vision-only.
 register_mjlab_task(
   task_id="Mjlab-Football-Passing-Perception-Unitree-G1",
   env_cfg=unitree_g1_passing_perception_env_cfg(),
   play_env_cfg=unitree_g1_passing_perception_env_cfg(play=True),
   rl_cfg=unitree_g1_passing_perception_vq_runner_cfg(),
+  runner_cls=DownStreamVQOnPolicyRunner,
+)
+
+# Kicking-Perception — strike the ball toward the goal, vision-only.
+register_mjlab_task(
+  task_id="Mjlab-Football-Kicking-Perception-Unitree-G1",
+  env_cfg=unitree_g1_kicking_perception_env_cfg(),
+  play_env_cfg=unitree_g1_kicking_perception_env_cfg(play=True),
+  rl_cfg=unitree_g1_kicking_perception_vq_runner_cfg(),
+  runner_cls=DownStreamVQOnPolicyRunner,
+)
+
+# Dribbling-Perception — push the ball toward the goal, vision-only.
+register_mjlab_task(
+  task_id="Mjlab-Football-Dribbling-Perception-Unitree-G1",
+  env_cfg=unitree_g1_dribbling_perception_env_cfg(),
+  play_env_cfg=unitree_g1_dribbling_perception_env_cfg(play=True),
+  rl_cfg=unitree_g1_dribbling_perception_vq_runner_cfg(),
   runner_cls=DownStreamVQOnPolicyRunner,
 )

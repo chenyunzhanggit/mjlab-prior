@@ -4,10 +4,9 @@ Inherits :class:`DribblingGoalCommand` for the buffer mechanics. The
 actual goal_pos is written by ``reset_ball_along_line_kicking`` at every
 reset (since the kicking layout couples robot / ball / goal along a
 common direction), so ``_resample_command`` only manages the
-resampling timer here. Compared to reference, debug visualization is
-intentionally minimal — the renderer doesn't support per-env cuboid
-markers in the same way as the IsaacLab marker manager, so we just draw
-a sphere at the goal centre (left/right posts are sketched as side spheres).
+resampling timer here. Debug visualization draws a single translucent
+green sphere at the goal location, matching the passing task's
+source-zone marker style.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from .commands_dribbling import DribblingGoalCommand, DribblingGoalCommandCfg
@@ -44,30 +42,16 @@ class KickingGoalCommand(DribblingGoalCommand):
     env_indices = visualizer.get_env_indices(self.num_envs)
     if not env_indices:
       return
-    half_w = self.cfg.goal_width / 2.0
-    goal_h = self.cfg.goal_height
+    # Single translucent green sphere at the goal location, matching the
+    # passing task's source-zone visualization style.
     for idx in env_indices:
-      gx, gy, _gz = self.goal_pos[idx].cpu().numpy()
-      # Centre of crossbar.
+      pos = self.goal_pos[idx].cpu().numpy().copy()
+      pos[2] = 0.01
       visualizer.add_sphere(
-        center=np.array([gx, gy, goal_h]),
-        radius=0.12,
-        color=(1.0, 1.0, 1.0, 0.9),
-        label=f"kicking_goal_centre_{idx}",
-      )
-      # Posts as vertical "sphere stacks" — DebugVisualizer doesn't expose
-      # cuboid; one sphere per post is enough for debugging.
-      visualizer.add_sphere(
-        center=np.array([gx, gy - half_w, goal_h / 2.0]),
-        radius=0.12,
-        color=(1.0, 1.0, 1.0, 0.9),
-        label=f"kicking_goal_left_{idx}",
-      )
-      visualizer.add_sphere(
-        center=np.array([gx, gy + half_w, goal_h / 2.0]),
-        radius=0.12,
-        color=(1.0, 1.0, 1.0, 0.9),
-        label=f"kicking_goal_right_{idx}",
+        center=pos,
+        radius=0.3,
+        color=(0.0, 1.0, 0.2, 0.35),
+        label=f"kicking_goal_{idx}",
       )
 
 

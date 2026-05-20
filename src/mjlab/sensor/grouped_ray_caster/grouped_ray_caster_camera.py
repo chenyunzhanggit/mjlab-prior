@@ -490,7 +490,7 @@ class GroupedRayCasterCamera(GroupedRayCaster):
     point_radius = max(0.003 * meansize, 0.01)
     # mjlab-prior tweak: bigger camera frame so it's clearly visible against
     # the robot body (was 0.15*meansize / 0.01*meansize → too small to spot).
-    frame_scale = max(0.45 * meansize, 0.3)
+    frame_scale = max(0.15 * meansize, 0.3)
     frame_axis_radius = max(0.02 * meansize, 0.012)
     raycast_data = self.raycast_data
 

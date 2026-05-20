@@ -45,20 +45,31 @@ def unitree_g1_passing_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
   return _default_vq_runner_cfg("g1_football_passing_vq")
 
 
-def unitree_g1_passing_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
-  """Vision-aware :class:`DownStreamVQVisionPolicy` runner cfg.
+def _perception_vq_runner_cfg(experiment_name: str) -> RslRlDownstreamVQRunnerCfg:
+  """Shared vision-aware :class:`DownStreamVQVisionPolicy` runner cfg.
 
   Image shape is **auto-detected** from the env's ``depth`` obs group at
   runtime (see ``DownStreamVQOnPolicyRunner._build_policy``); the
   ``image_height`` / ``image_width`` fields on the policy cfg are only
-  used as fallback when the env doesn't expose a depth group. Here we
-  leave them at the defaults (None) since the env_cfg always provides
-  one for this task.
+  used as fallback when the env doesn't expose a depth group. We leave
+  them at defaults (None) since perception env_cfgs always provide one.
 
   CNN: 3 strided convs (16→32→32) → Linear → 64-d embedding, mirroring
   the topology mjlab-prior-main / mjlab-loco use for the same input size.
   """
-  cfg = _default_vq_runner_cfg("g1_football_passing_perception_vq")
+  cfg = _default_vq_runner_cfg(experiment_name)
   cfg.policy.depth_embedding_dim = 64
   cfg.policy.depth_channels = (16, 32, 32)
   return cfg
+
+
+def unitree_g1_passing_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
+  return _perception_vq_runner_cfg("g1_football_passing_perception_vq")
+
+
+def unitree_g1_kicking_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
+  return _perception_vq_runner_cfg("g1_football_kicking_perception_vq")
+
+
+def unitree_g1_dribbling_perception_vq_runner_cfg() -> RslRlDownstreamVQRunnerCfg:
+  return _perception_vq_runner_cfg("g1_football_dribbling_perception_vq")

@@ -1056,3 +1056,180 @@ def unitree_g1_passing_perception_env_cfg(
   }
 
   return cfg
+
+
+# ---------------------------------------------------------------------------
+# Shared perception obs builder for kicking / dribbling perception variants
+# ---------------------------------------------------------------------------
+#
+# NOTE: ``unitree_g1_passing_perception_env_cfg`` above builds its obs groups
+# inline (kept as-is so its already-trained ckpts stay shape-compatible).
+# The kicking / dribbling perception variants below share this helper, which
+# follows the exact same 4-group layout:
+#
+#   motion_prior_obs : proprio×4 (frozen VQ backbone input)
+#   policy           : task command(s) + proprio (NO direct ball state, NO depth)
+#   depth            : (1, H, W) depth image from the pelvis camera
+#   critic           : task command(s) + privileged ball state + proprio + base_lin_vel
+#
+# ``command_terms`` are the task goal observations that BOTH policy and
+# critic see (e.g. ``goal_position`` — telling the robot where the net is,
+# which is part of the task spec, not a "cheat" ball-state read).
+# ``privileged_terms`` are the direct ball observations that ONLY the critic
+# sees (asymmetric actor-critic).
+
+
+def _make_perception_obs_groups(
+  *,
+  play: bool,
+  command_terms: dict[str, ObservationTermCfg],
+  privileged_terms: dict[str, ObservationTermCfg],
+) -> dict[str, ObservationGroupCfg]:
+  """Build the 4 obs groups (motion_prior_obs / policy / depth / critic) for
+  a perception-only football task. See module-level note above."""
+  enable_corruption = not play
+
+  motion_prior_obs = _make_motion_prior_obs_group(
+    enable_corruption=enable_corruption, with_height_scan=False
+  )
+
+  # policy: task command(s) + proprio. No ball state, no depth.
+  policy = ObservationGroupCfg(
+    terms={**command_terms, **_make_proprio_terms()},
+    concatenate_terms=True,
+    enable_corruption=enable_corruption,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  # depth: 4-D image group (sensor already did normalise/dropout/crop/mask).
+  depth = ObservationGroupCfg(
+    terms={
+      "depth_image": ObservationTermCfg(
+        func=envs_mdp.depth_image,
+        params={
+          "sensor_cfg": SceneEntityCfg(PERCEPTION_SENSOR_NAME),
+          "data_type": "distance_to_image_plane_noised",
+        },
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=False,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  # critic: command(s) + privileged ball state + proprio + base_lin_vel.
+  critic = ObservationGroupCfg(
+    terms={
+      **command_terms,
+      **privileged_terms,
+      **_make_proprio_terms(),
+      "base_lin_vel": ObservationTermCfg(
+        func=envs_mdp.builtin_sensor,
+        params={"sensor_name": "robot/imu_lin_vel"},
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=False,
+    nan_policy="warn",
+    nan_check_per_term=True,
+  )
+
+  return {
+    "motion_prior_obs": motion_prior_obs,
+    "policy": policy,
+    "depth": depth,
+    "critic": critic,
+  }
+
+
+def unitree_g1_kicking_perception_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Perception-only kicking task.
+
+  Same physics / rewards / terminations / reset as
+  :func:`unitree_g1_kicking_env_cfg`, but the policy can't read ball state
+  directly. It sees:
+
+  * ``goal_position`` — net location relative to the robot (task command,
+    kept; this is *where to kick to*, not a ball-state cheat).
+  * ``depth_image`` — pelvis pinhole depth camera (same D405 16:9 setup
+    as passing perception).
+
+  Critic keeps privileged ``ball_relative_position`` / ``ball_velocity`` /
+  ``ball_to_goal_vector`` / ``ball_absolute_position`` for asymmetric AC.
+  """
+  cfg = unitree_g1_kicking_env_cfg(play=play)
+  cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_depth_camera_cfg())
+  cfg.observations = _make_perception_obs_groups(
+    play=play,
+    command_terms={
+      "goal_position": ObservationTermCfg(
+        func=football_mdp.dribbling_goal_position,
+        params={"command_name": "kicking_commands"},
+      ),
+    },
+    privileged_terms={
+      "ball_relative_position": ObservationTermCfg(
+        func=football_mdp.ball_relative_position,
+        params={"ball_name": _BALL_ENTITY, "asset_name": "robot"},
+      ),
+      "ball_velocity": ObservationTermCfg(
+        func=football_mdp.ball_velocity,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+      "ball_to_goal_vector": ObservationTermCfg(
+        func=football_mdp.ball_to_goal_vector,
+        params={"ball_name": _BALL_ENTITY, "command_name": "kicking_commands"},
+      ),
+      "ball_absolute_position": ObservationTermCfg(
+        func=football_mdp.ball_absolute_position,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+    },
+  )
+  return cfg
+
+
+def unitree_g1_dribbling_perception_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Perception-only dribbling task.
+
+  Same physics / rewards / terminations / reset as
+  :func:`unitree_g1_dribbling_env_cfg`, but the policy can't read ball state
+  directly. It sees ``goal_position`` (task command) + ``depth_image``
+  (pelvis camera). Critic keeps the privileged ball state.
+  """
+  cfg = unitree_g1_dribbling_env_cfg(play=play)
+  cfg.scene.sensors = (*(cfg.scene.sensors or ()), _make_g1_depth_camera_cfg())
+  cfg.observations = _make_perception_obs_groups(
+    play=play,
+    command_terms={
+      "goal_position": ObservationTermCfg(
+        func=football_mdp.dribbling_goal_position,
+        params={"command_name": "dribbling_commands"},
+      ),
+    },
+    privileged_terms={
+      "ball_relative_position": ObservationTermCfg(
+        func=football_mdp.ball_relative_position,
+        params={"ball_name": _BALL_ENTITY, "asset_name": "robot"},
+      ),
+      "ball_velocity": ObservationTermCfg(
+        func=football_mdp.ball_velocity,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+      "ball_to_goal_vector": ObservationTermCfg(
+        func=football_mdp.ball_to_goal_vector,
+        params={"ball_name": _BALL_ENTITY, "command_name": "dribbling_commands"},
+      ),
+      "ball_absolute_position": ObservationTermCfg(
+        func=football_mdp.ball_absolute_position,
+        params={"ball_name": _BALL_ENTITY},
+      ),
+    },
+  )
+  return cfg
