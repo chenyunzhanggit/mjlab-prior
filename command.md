@@ -26,12 +26,16 @@ uv run python -m mjlab.scripts.train Mjlab-Football-Passing-VQ-Unitree-G1 --moti
 
 kicking dribbling
 
-
 # play
-
 uv run python -m mjlab.scripts.play Mjlab-Downstream-VQ-Velocity-Unitree-G1 --checkpoint-file /home/dx/mjlab-prior/logs/rsl_rl/g1_downstream_vq_velocity/2026-05-13_18-43-17/model_75500.pt --num-envs 1 --motion-prior-ckpt-path "/home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/2026-05-13_18-18-49/model_1500.pt" --viewer viser 
 
+# depth image pass test
+uv run python -m mjlab.scripts.train Mjlab-Football-Passing-Perception-Unitree-G1 --motion-prior-ckpt-path /home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/2026-05-13_18-18-49/model_6500.pt --num-envs 3072
 
+# play
+uv run python scripts/play_perception_depth_viz.py Mjlab-Football-Passing-Perception-Unitree-G1 --agent zero --num-envs 1 --viewer viser 
+
+uv run python scripts/play_perception_depth_viz.py Mjlab-Football-Passing-Perception-Unitree-G1 --num-envs 1 --viewer viser --checkpoint-file /home/dx/mjlab-prior/logs/rsl_rl/g1_football_passing_perception_vq/2026-05-19_20-25-22/model_11000.pt --motion-prior-ckpt-path /home/dx/mjlab-prior/logs/rsl_rl/g1_motion_prior_single_vq/2026-05-13_18-18-49/model_6500.pt
 
 ```
 
