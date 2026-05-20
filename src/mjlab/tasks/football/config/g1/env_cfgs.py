@@ -854,6 +854,11 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
   return NoisyGroupedRayCasterCameraCfg(
     name=PERCEPTION_SENSOR_NAME,
     frame=ObjRef(type="body", name="pelvis", entity="robot"),
+    # debug_vis=True makes viser auto-add a "Sensor debug viz → camera"
+    # checkbox; GroupedRayCasterCamera.debug_vis then draws up to 512 red
+    # ray-hit spheres + the camera coordinate frame each tick. Negligible
+    # cost in play; ignored in headless training.
+    debug_vis=True,
     pattern=PinholeCameraPatternCfg(
       height=PERCEPTION_RAW_HEIGHT,
       width=PERCEPTION_RAW_WIDTH,

@@ -129,6 +129,12 @@ class GroupedRayCasterCamera(GroupedRayCaster):
     self._refresh_mask: torch.Tensor = torch.empty(0, dtype=torch.bool)
     self._has_fresh_sense = False
 
+    # mjlab-prior extension (not in mjlab-prior-main): independent toggles
+    # for the two debug-vis components, exposed as sub-checkboxes in the
+    # viser viewer (see ViserPlayViewer._create_sensor_debug_vis_gui).
+    self._viz_show_rays: bool = True
+    self._viz_show_camera: bool = True
+
   def __str__(self) -> str:
     """Returns: A string containing information about the instance."""
     update_period_str = (
@@ -482,42 +488,46 @@ class GroupedRayCasterCamera(GroupedRayCaster):
 
     meansize = max(float(visualizer.meansize), 1e-6)
     point_radius = max(0.003 * meansize, 0.01)
-    frame_scale = max(0.15 * meansize, 0.1)
-    frame_axis_radius = max(0.01 * meansize, 0.005)
+    # mjlab-prior tweak: bigger camera frame so it's clearly visible against
+    # the robot body (was 0.15*meansize / 0.01*meansize → too small to spot).
+    frame_scale = max(0.45 * meansize, 0.3)
+    frame_axis_radius = max(0.02 * meansize, 0.012)
     raycast_data = self.raycast_data
 
-    # Only visualize rays that actually hit a surface (distance >= 0).
-    # Miss rays keep the ray origin as their hit position, which would cluster
-    # all miss points inside the robot head and make them invisible.
-    hit_mask = (raycast_data.distances[env_ids] >= 0).reshape(
-      -1
-    )  # (len(env_ids)*num_rays,)
-    viz_points = raycast_data.hit_pos_w[env_ids].reshape(-1, 3)
-    viz_points = viz_points[hit_mask]
+    # ---- ray hits (toggle: self._viz_show_rays) ----
+    if self._viz_show_rays:
+      # Only visualize rays that actually hit a surface (distance >= 0).
+      # Miss rays keep the ray origin as their hit position, which would
+      # cluster all miss points inside the robot head and be invisible.
+      hit_mask = (raycast_data.distances[env_ids] >= 0).reshape(-1)
+      viz_points = raycast_data.hit_pos_w[env_ids].reshape(-1, 3)
+      viz_points = viz_points[hit_mask]
 
-    max_points = 512
-    if viz_points.shape[0] > max_points:
-      stride = max(1, viz_points.shape[0] // max_points)
-      viz_points = viz_points[::stride]
+      max_points = 512
+      if viz_points.shape[0] > max_points:
+        stride = max(1, viz_points.shape[0] // max_points)
+        viz_points = viz_points[::stride]
 
-    for point in viz_points:
-      visualizer.add_sphere(
-        center=point,
-        radius=point_radius,
-        color=(1.0, 0.1, 0.1, 0.6),
-      )
+      for point in viz_points:
+        visualizer.add_sphere(
+          center=point,
+          radius=point_radius,
+          color=(1.0, 0.1, 0.1, 0.6),
+        )
 
-    camera_pos = self._camera_data.pos_w[env_ids]
-    camera_quat = self._camera_data.quat_w_world[env_ids]
-    camera_rot = math_utils.matrix_from_quat(camera_quat)
-    for idx in range(len(env_ids)):
-      visualizer.add_frame(
-        position=camera_pos[idx],
-        rotation_matrix=camera_rot[idx],
-        scale=frame_scale,
-        axis_radius=frame_axis_radius,
-        alpha=0.9,
-      )
+    # ---- camera frame (toggle: self._viz_show_camera) ----
+    if self._viz_show_camera:
+      camera_pos = self._camera_data.pos_w[env_ids]
+      camera_quat = self._camera_data.quat_w_world[env_ids]
+      camera_rot = math_utils.matrix_from_quat(camera_quat)
+      for idx in range(len(env_ids)):
+        visualizer.add_frame(
+          position=camera_pos[idx],
+          rotation_matrix=camera_rot[idx],
+          scale=frame_scale,
+          axis_radius=frame_axis_radius,
+          alpha=0.9,
+        )
 
   """
     Private Helpers

@@ -401,6 +401,32 @@ class ViserPlayViewer(BaseViewer):
 
       cb.on_update(_on_update)
 
+      # Camera-style raycasters (GroupedRayCasterCamera) expose two
+      # independent debug-vis components — ray hits and the camera frame.
+      # Surface them as sub-checkboxes so the operator can toggle each.
+      if hasattr(sensor, "_viz_show_rays") and hasattr(sensor, "_viz_show_camera"):
+        cb_rays = self._server.gui.add_checkbox(
+          f"  {sensor.cfg.name} · rays",
+          initial_value=sensor._viz_show_rays,
+        )
+
+        def _on_rays(_ev, _s=sensor, _cb=cb_rays) -> None:
+          _s._viz_show_rays = _cb.value
+          self._scene.needs_update = True
+
+        cb_rays.on_update(_on_rays)
+
+        cb_cam = self._server.gui.add_checkbox(
+          f"  {sensor.cfg.name} · camera frame",
+          initial_value=sensor._viz_show_camera,
+        )
+
+        def _on_cam(_ev, _s=sensor, _cb=cb_cam) -> None:
+          _s._viz_show_camera = _cb.value
+          self._scene.needs_update = True
+
+        cb_cam.on_update(_on_cam)
+
   def _create_reward_debug_vis_gui(self) -> None:
     """Add per-reward debug visualization checkboxes."""
     env = self.env.unwrapped
