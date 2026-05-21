@@ -42,6 +42,7 @@ from .rewards import (
   foot_ball_contact_reward,
   foot_ball_proximity_reward,
   kick_ball_toward_goal,
+  stay_near_initial_position,
 )
 from .terminations import (
   ball_no_progress_timeout,
@@ -49,6 +50,8 @@ from .terminations import (
   ball_reach_goal_termination,
   ball_stopped_after_kick,
   ball_too_far_termination,
+  base_strayed_from_initial,
+  passing_success_settle,
 )
 
 __all__ = [
@@ -78,9 +81,12 @@ __all__ = [
   "foot_ball_contact_reward",
   "foot_ball_proximity_reward",
   "kick_ball_toward_goal",
+  "stay_near_initial_position",
   "ball_no_progress_timeout",
   "ball_passed_through_zone",
   "ball_reach_goal_termination",
   "ball_stopped_after_kick",
   "ball_too_far_termination",
+  "base_strayed_from_initial",
+  "passing_success_settle",
 ]

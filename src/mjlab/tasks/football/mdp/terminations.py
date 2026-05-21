@@ -174,3 +174,100 @@ def ball_stopped_after_kick(
     torch.zeros_like(env._kick_stop_counter),
   )
   return env._kick_stop_counter >= stop_steps
+
+
+def base_strayed_from_initial(
+  env: ManagerBasedRlEnv,
+  asset_name: str = "robot",
+  max_distance: float = 1.5,
+) -> torch.Tensor:
+  """Failure termination: base XY drifted too far from its initial spot.
+
+  Shares the ``_passing_init_base_xy`` cache populated at the first
+  post-reset step (see :func:`rewards.stay_near_initial_position`). Used by
+  the passing task, where the ball comes to the robot, so straying far from
+  the spawn point means the robot wandered off instead of holding position.
+  """
+  robot: Entity = env.scene[asset_name]
+  cur_xy = robot.data.root_link_pos_w[:, :2]
+
+  init = getattr(env, "_passing_init_base_xy", None)
+  if init is None or init.shape[0] != env.num_envs:
+    init = cur_xy.clone()
+    env._passing_init_base_xy = init
+  just_reset = (env.episode_length_buf == 1).unsqueeze(-1)
+  env._passing_init_base_xy = torch.where(just_reset, cur_xy, env._passing_init_base_xy)
+
+  dist = torch.norm(cur_xy - env._passing_init_base_xy, dim=-1)
+  return dist > max_distance
+
+
+def passing_success_settle(
+  env: ManagerBasedRlEnv,
+  ball_name: str,
+  command_name: str,
+  zone_radius: float = 1.5,
+  min_redirect_speed: float = 1.5,
+  settle_time_s: float = 5.0,
+) -> torch.Tensor:
+  """Passing success with a post-success settle grace period.
+
+  Latches success the same way as :func:`ball_passed_through_zone` (ball
+  redirected toward source above ``min_redirect_speed`` and then within
+  ``zone_radius`` of the source). Once latched, a per-env timer counts up
+  every step and the episode terminates only after ``settle_time_s`` of
+  continued standing. This forces the policy to stay upright for a while
+  after completing the pass instead of ending the instant the ball arrives.
+
+  Registered as a ``time_out`` termination (bootstrapped, not a failure):
+  reaching here means the task succeeded and the settle window elapsed.
+  """
+  ball: Entity = env.scene[ball_name]
+  command = env.command_manager.get_term(command_name)
+
+  ball_xy = ball.data.root_link_pos_w[:, :2]
+  ball_vel_xy = ball.data.root_link_lin_vel_w[:, :2]
+  src_xy = command.goal_pos[:, :2]  # ``goal_pos`` aliases ``source_pos``
+
+  to_src = src_xy - ball_xy
+  norm = torch.norm(to_src, dim=-1, keepdim=True).clamp(min=1e-6)
+  to_src_dir = to_src / norm
+  vel_toward_src = (ball_vel_xy * to_src_dir).sum(-1)
+  dist = torch.norm(to_src, dim=-1)
+
+  just_reset = env.episode_length_buf == 1
+
+  redirected = getattr(env, "_ball_redirected", None)
+  if redirected is None or redirected.shape[0] != env.num_envs:
+    redirected = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env._ball_redirected = redirected
+  env._ball_redirected = env._ball_redirected & ~just_reset
+  env._ball_redirected = env._ball_redirected | (vel_toward_src >= min_redirect_speed)
+  in_zone = env._ball_redirected & (dist < zone_radius)
+
+  # Latch overall success so the timer keeps running even if the ball later
+  # rolls back out of the zone.
+  succeeded = getattr(env, "_passing_succeeded", None)
+  if succeeded is None or succeeded.shape[0] != env.num_envs:
+    succeeded = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env._passing_succeeded = succeeded
+  env._passing_succeeded = env._passing_succeeded & ~just_reset
+  env._passing_succeeded = env._passing_succeeded | in_zone
+
+  counter = getattr(env, "_passing_settle_counter", None)
+  if counter is None or counter.shape[0] != env.num_envs:
+    counter = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    env._passing_settle_counter = counter
+  env._passing_settle_counter = torch.where(
+    just_reset,
+    torch.zeros_like(env._passing_settle_counter),
+    env._passing_settle_counter,
+  )
+  env._passing_settle_counter = torch.where(
+    env._passing_succeeded,
+    env._passing_settle_counter + 1,
+    env._passing_settle_counter,
+  )
+
+  settle_steps = max(1, int(round(settle_time_s / env.step_dt)))
+  return env._passing_settle_counter >= settle_steps

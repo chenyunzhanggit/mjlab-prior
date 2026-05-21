@@ -878,15 +878,21 @@ def _make_g1_depth_camera_cfg() -> NoisyGroupedRayCasterCameraCfg:
     depth_clipping_behavior="max",
     update_period=1 / 30,        # 30 Hz, D405 native frame rate @ 720p / 480p
     offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
-      pos=(0.0487988662332928, 0.01, 0.4378029937970051),  # chest height,
-                                                            # ~5cm front, 1cm
-                                                            # right, 44cm up
+      # Chest-mounted, sitting ON the torso surface (only a few cm proud) —
+      # NOT floating out in front of the body. The previous self-occlusion
+      # (big near-range blob in the lower FOV) is fixed mainly by flattening
+      # the pitch so the lens looks FORWARD over the chest instead of down
+      # across its own belly, plus a small forward offset onto the chest.
+      pos=(0.05, 0.0, 0.40),      # ~10cm front (on chest), centred, ~40cm up
+      # ~30° pitch down (was ~48°): forward-leaning so the incoming ball at
+      # 3–6 m stays in frame and the lens no longer stares into its own
+      # chest/belly. quat = (cos(15°), 0, sin(15°), 0).
       rot=(
-        0.9135367613482678,
-        0.004363309284746571,
-        0.4067366430758002,
+        0.9659258,
         0.0,
-      ),                          # ~45° pitch down — sees ground + incoming ball
+        0.2588190,
+        0.0,
+      ),
       convention="world",         # forward=+X, up=+Z
     ),
     noise_pipeline={
@@ -1054,6 +1060,44 @@ def unitree_g1_passing_perception_env_cfg(
     "depth": depth,
     "critic": critic,
   }
+
+  # ---- Task re-spec: hold position + settle after the pass ----------------
+  # The ball is launched TOWARD the robot, so it must NOT chase/wander — it
+  # waits at its spawn spot, redirects the incoming ball using vision, then
+  # keeps standing. We add three terms on top of the inherited passing cfg:
+  #   (1) reward staying near the episode-initial base XY (gaussian, σ=0.5 m)
+  #       so "hold your spot and wait" beats wandering;
+  #   (2) fail-terminate if the base strays > 1.5 m from spawn (hard backstop,
+  #       ~3× the σ tolerance);
+  #   (3) on a successful pass (ball redirected back into the source zone) do
+  #       NOT end immediately — run a 5 s settle window (time_out flavour, so
+  #       it bootstraps as success) so the policy learns to stay upright after
+  #       completing the pass.
+  cfg.rewards["stay_in_place"] = RewardTermCfg(
+    func=football_mdp.stay_near_initial_position,
+    weight=3.0,
+    params={"asset_name": "robot", "std": 0.5},
+  )
+  # The inherited base-passing cfg still has the INSTANT success termination
+  # ``ball_in_zone`` (ball_passed_through_zone) — it fires the moment the ball
+  # enters the source zone, which would pre-empt the settle window below and
+  # make ``passing_settled`` dead. Drop it here so the 5 s settle takes over.
+  cfg.terminations.pop("ball_in_zone", None)
+  cfg.terminations["base_strayed"] = TerminationTermCfg(
+    func=football_mdp.base_strayed_from_initial,
+    params={"asset_name": "robot", "max_distance": 1.5},
+  )
+  cfg.terminations["passing_settled"] = TerminationTermCfg(
+    func=football_mdp.passing_success_settle,
+    time_out=True,
+    params={
+      "ball_name": _BALL_ENTITY,
+      "command_name": "passing_commands",
+      "zone_radius": 1.5,
+      "min_redirect_speed": 1.5,
+      "settle_time_s": 5.0,
+    },
+  )
 
   return cfg
 

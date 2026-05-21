@@ -207,6 +207,42 @@ def ball_reach_goal_reward(
 
 
 # ---------------------------------------------------------------------------
+# Hold-position (anti-wander) — passing waits in place for the incoming ball
+# ---------------------------------------------------------------------------
+
+
+def stay_near_initial_position(
+  env: ManagerBasedRlEnv,
+  asset_name: str = "robot",
+  std: float = 0.5,
+) -> torch.Tensor:
+  """Reward the base for staying near its episode-initial XY position.
+
+  Records the base XY at the first post-reset step (``episode_length_buf
+  == 1``) into ``env._passing_init_base_xy`` and returns
+  ``exp(-d²/2σ²)`` where ``d`` is the current XY displacement from that
+  recorded position. For the passing task the ball comes to the robot, so
+  this encourages it to hold its spot and wait rather than wander off.
+
+  The ``_passing_init_base_xy`` cache is shared with
+  :func:`terminations.base_strayed_from_initial`; both refresh it
+  identically on reset, so whichever runs first is consistent.
+  """
+  robot: Entity = env.scene[asset_name]
+  cur_xy = robot.data.root_link_pos_w[:, :2]
+
+  init = getattr(env, "_passing_init_base_xy", None)
+  if init is None or init.shape[0] != env.num_envs:
+    init = cur_xy.clone()
+    env._passing_init_base_xy = init
+  just_reset = (env.episode_length_buf == 1).unsqueeze(-1)
+  env._passing_init_base_xy = torch.where(just_reset, cur_xy, env._passing_init_base_xy)
+
+  dist = torch.norm(cur_xy - env._passing_init_base_xy, dim=-1)
+  return torch.exp(-(dist**2) / (2 * std**2))
+
+
+# ---------------------------------------------------------------------------
 # Kicking-specific
 # ---------------------------------------------------------------------------
 
