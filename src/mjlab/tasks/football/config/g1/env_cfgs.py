@@ -1078,6 +1078,14 @@ def unitree_g1_passing_perception_env_cfg(
     weight=3.0,
     params={"asset_name": "robot", "std": 0.5},
   )
+  # No-pass curriculum: 20% of TRAINING episodes spawn a stationary ball
+  # (no incoming pass). With the stay-in-place reward above, "stand still and
+  # wait when no ball is coming" becomes in-distribution, which trains away
+  # the OOD "air-kick" the policy showed when the ball was set to speed 0.
+  # (At play we leave the reset deterministic so manual ball-speed tests
+  # behave as set.)
+  if not play:
+    cfg.events["reset_ball_along_line"].params["no_pass_prob"] = 0.2
   # The inherited base-passing cfg still has the INSTANT success termination
   # ``ball_in_zone`` (ball_passed_through_zone) — it fires the moment the ball
   # enters the source zone, which would pre-empt the settle window below and

@@ -216,6 +216,7 @@ def reset_ball_along_line_passing(
   ball_radius: float = 0.11,
   robot_xy_noise: float = 0.2,
   robot_init_height: float = 0.78,
+  no_pass_prob: float = 0.0,
 ) -> None:
   env_ids = _resolve_env_ids(env, env_ids)
   n = len(env_ids)
@@ -249,6 +250,14 @@ def reset_ball_along_line_passing(
   to_robot_xy = robot_xy - src_pos[:, :2]
   to_robot_norm = to_robot_xy / to_robot_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
   speed = torch.rand(n, device=env.device) * (hi_v - lo_v) + lo_v
+  if no_pass_prob > 0.0:
+    # "No-pass" curriculum: a fraction of episodes spawn a STATIONARY ball
+    # (speed 0) that never comes to the robot. Combined with the
+    # stay-in-place reward, this teaches the policy to just stand and wait
+    # when no ball is incoming, fixing the out-of-distribution "air-kick"
+    # behaviour seen when the ball is set to velocity 0 at test time.
+    no_pass = torch.rand(n, device=env.device) < no_pass_prob
+    speed = torch.where(no_pass, torch.zeros_like(speed), speed)
   vel_xy = to_robot_norm * speed.unsqueeze(-1)
   vel_w = torch.cat([vel_xy, torch.zeros(n, 1, device=env.device)], dim=-1)
 
